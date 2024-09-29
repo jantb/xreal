@@ -1,0 +1,25 @@
+[package]
+name = "xreal"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tracing = "0.1.40"
+winit = { version = "0.30.5", features = ["default", "rwh_05"] }
+tracing-subscriber = "0.3.18"
+softbuffer = "0.4.6"
+image = "0.25.2"
+
+screenshots = "0.8.10"
+scrap = "0.5.0"
+scap = {git = "https://github.com/CapSoftware/scap"}
+core-graphics = "0.24.0"
+core-foundation = "0.10.0"
+pixels = "0.14.0"
+
+dcmimu = "0.2.2"
+nalgebra = { version = "0.33.0", default-features = false, features = ["std"] }
+hidapi = { version = "2.6.3" }
+byteorder = "1.5.0"
+tinyjson = { version = "2.5.1" }
+bytemuck = { version = "1.18.0" }
