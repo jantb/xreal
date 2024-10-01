@@ -7,12 +7,12 @@ use std::sync::{Arc, Mutex};
 
 use dcmimu::DCMIMU;
 use std::time::Duration;
-use std::{thread, time};
+use std::{thread};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, StartCause, WindowEvent};
+use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId, WindowLevel};
+use winit::window::{Window, WindowId};
 
 use pixels::{Pixels, SurfaceTexture};
 use scap::capturer::{Capturer, Options};
@@ -174,8 +174,8 @@ impl ApplicationHandler for ControlFlowDemo {
                         (dcm.yaw, dcm.roll)
                     };
 
-                    self.o_x = -yaw;
-                    self.o_y = roll;
+                    self.o_x = yaw;
+                    self.o_y = -roll;
                 }
                 Key::Named(NamedKey::Escape) => {
                     self.close_requested = true;
