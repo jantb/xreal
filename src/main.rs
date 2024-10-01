@@ -12,19 +12,11 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Window, WindowId, WindowLevel};
 
 use pixels::{Pixels, SurfaceTexture};
 use scap::capturer::{Capturer, Options};
 use scap::frame::{BGRAFrame, Frame};
-
-const WAIT_TIME: time::Duration = time::Duration::from_millis(8);
-
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    #[default]
-    WaitUntil,
-}
 
 struct SharedGlassesStore {
     dcmimu: Arc<Mutex<DCMIMU>>,
@@ -83,7 +75,7 @@ fn main() -> Result<(), impl std::error::Error> {
     create_glasses_thread(&store);
 
     let mut recorder = Capturer::new(Options {
-        fps: 120,
+        fps: 60,
         show_cursor: true,
         show_highlight: true,
         excluded_targets: None,
@@ -97,9 +89,6 @@ fn main() -> Result<(), impl std::error::Error> {
 }
 
 struct ControlFlowDemo {
-    mode: Mode,
-    request_redraw: bool,
-    wait_cancelled: bool,
     close_requested: bool,
     pixels: Option<Pixels>,
     window: Option<Window>,
@@ -116,9 +105,6 @@ struct ControlFlowDemo {
 impl ControlFlowDemo {
     fn new(recorder: Capturer, store: SharedGlassesStore) -> Self {
         Self {
-            mode: Mode::WaitUntil,
-            request_redraw: true,
-            wait_cancelled: false,
             close_requested: false,
             pixels: None,
             window: None,
@@ -135,15 +121,13 @@ impl ControlFlowDemo {
 }
 
 impl ApplicationHandler for ControlFlowDemo {
-    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
-        self.wait_cancelled = matches!(cause, StartCause::WaitCancelled { .. } if self.mode == Mode::WaitUntil);
-    }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window_attributes = Window::default_attributes().with_title(
             "Xreal renderer",
         ).with_resizable(false)
-            .with_inner_size(winit::dpi::LogicalSize::new(1920.0, 1080.0));
+            .with_inner_size(winit::dpi::LogicalSize::new(1920.0, 1080.0))
+            ;
         let window = event_loop.create_window(window_attributes).unwrap();
         self.screen_width = window.primary_monitor().unwrap().size().width as usize;
         let size = window.inner_size();
@@ -171,22 +155,27 @@ impl ApplicationHandler for ControlFlowDemo {
                 ..
             } => match key.as_ref() {
                 Key::Named(NamedKey::ArrowRight) => {
-                    self.o_x -= 0.004;
+                    self.o_x -= 0.008;
                 }
 
                 Key::Named(NamedKey::ArrowUp) => {
-                    self.o_y += 0.004;
+                    self.o_y += 0.008;
                 }
                 Key::Named(NamedKey::ArrowDown) => {
-                    self.o_y -= 0.004;
+                    self.o_y -= 0.008;
                 }
 
                 Key::Named(NamedKey::ArrowLeft) => {
-                    self.o_x += 0.004;
+                    self.o_x += 0.008;
                 }
-                Key::Character("r") => {
-                    self.request_redraw = !self.request_redraw;
-                    println!("request_redraw: {}", self.request_redraw);
+                Key::Named(NamedKey::Space) => {
+                    let (yaw, roll) = {
+                        let dcm = self.store.dcmimu.lock().unwrap().all();
+                        (dcm.yaw, dcm.roll)
+                    };
+
+                    self.o_x = -yaw;
+                    self.o_y = roll;
                 }
                 Key::Named(NamedKey::Escape) => {
                     self.close_requested = true;
@@ -243,17 +232,11 @@ impl ApplicationHandler for ControlFlowDemo {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.request_redraw && !self.wait_cancelled && !self.close_requested {
+        if !self.close_requested {
             self.window.as_ref().unwrap().request_redraw();
         }
 
-        match self.mode {
-            Mode::WaitUntil => {
-                if !self.wait_cancelled {
-                    event_loop.set_control_flow(ControlFlow::WaitUntil(time::Instant::now() + WAIT_TIME));
-                }
-            }
-        };
+        event_loop.set_control_flow(ControlFlow::Poll);
 
         if self.close_requested {
             event_loop.exit();
