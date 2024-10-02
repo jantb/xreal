@@ -5,18 +5,20 @@ mod ar_drivers {
 use ar_drivers::lib::{any_glasses, GlassesEvent};
 use std::sync::{Arc, Mutex};
 
+use crossbeam_channel::{bounded, Receiver, Sender};
 use dcmimu::DCMIMU;
-use std::time::Duration;
-use std::{thread};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Fullscreen, Window, WindowId};
 
 use pixels::{Pixels, SurfaceTexture};
 use scap::capturer::{Capturer, Options};
 use scap::frame::{BGRAFrame, Frame};
+use thread_priority::{set_current_thread_priority, ThreadPriority};
 
 struct SharedGlassesStore {
     dcmimu: Arc<Mutex<DCMIMU>>,
@@ -24,35 +26,51 @@ struct SharedGlassesStore {
 
 fn create_glasses_thread(store: &SharedGlassesStore) {
     let shared_dcmimu_clone = Arc::clone(&store.dcmimu);
-    thread::spawn(move || {
-        let mut glasses = match any_glasses() {
-            Ok(glasses) => glasses,
-            Err(_) => return, // Exit if unable to acquire glasses
-        };
-        let mut last_timestamp: Option<u64> = None;
+    let last_timestamp = Arc::new(AtomicU64::new(0));
+    let (sender, receiver): (Sender<_>, Receiver<_>) = bounded(1);
 
-        loop {
-            match glasses.read_event() {
-                Ok(GlassesEvent::AccGyro {
-                       accelerometer,
-                       gyroscope,
-                       timestamp
-                   }) => {
-                    if let Some(last_timestamp) = last_timestamp {
-                        let dt = (timestamp - last_timestamp) as f32 / 1_000_000.0; // in seconds
-                        {
-                            let mut dcmimu = shared_dcmimu_clone.lock().unwrap();
-                            dcmimu.update(
-                                (gyroscope.x, gyroscope.y, gyroscope.z),
-                                (accelerometer.x, accelerometer.y, accelerometer.z),
-                                // (0., 0., 0.), // set accel to 0 to disable prediction
-                                dt,
-                            );
-                        }
+    thread::spawn({
+        set_current_thread_priority(ThreadPriority::Max).expect("Failed to set thread priority");
+        let last_timestamp = Arc::clone(&last_timestamp);
+        let sender = sender.clone();
+        move || {
+            let mut glasses = match any_glasses() {
+                Ok(glasses) => glasses,
+                Err(_) => return, // Exit if unable to acquire glasses
+            };
+
+            loop {
+                if let Ok(GlassesEvent::AccGyro {
+                              accelerometer,
+                              gyroscope,
+                              timestamp,
+                          }) = glasses.read_event()
+                {
+                    let last_ts = last_timestamp.load(Ordering::Relaxed);
+                    if last_ts != 0 {
+                        let dt = (timestamp - last_ts) as f32 / 1_000_000.0; // in seconds
+                        match sender.try_send((
+                            (gyroscope.x, gyroscope.y, gyroscope.z),
+                            (accelerometer.x, accelerometer.y, accelerometer.z),
+                            dt,
+                        )) {
+                            Ok(_) => {}
+                            Err(_) => {}
+                        };
                     }
-                    last_timestamp = Some(timestamp);
+                    last_timestamp.store(timestamp, Ordering::Relaxed);
                 }
-                _ => thread::sleep(Duration::from_millis(10)), // Sleep to avoid busy waiting
+                thread::yield_now();
+            }
+        }
+    });
+
+    thread::spawn({
+        move || loop {
+            set_current_thread_priority(ThreadPriority::Max).expect("Failed to set thread priority");
+            if let Ok((gyro, acc, dt)) = receiver.recv() {
+                let mut dcmimu = shared_dcmimu_clone.lock().unwrap();
+                dcmimu.update(gyro, acc, dt);
             }
         }
     });
@@ -123,12 +141,18 @@ impl ControlFlowDemo {
 impl ApplicationHandler for ControlFlowDemo {
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+
+
         let window_attributes = Window::default_attributes().with_title(
             "Xreal renderer",
-        ).with_resizable(false)
-            .with_inner_size(winit::dpi::LogicalSize::new(1920.0, 1080.0))
-            ;
+        ).with_inner_size(winit::dpi::LogicalSize::new(1920.0, 1080.0))
+            ;;
         let window = event_loop.create_window(window_attributes).unwrap();
+        let primary_monitor = window.primary_monitor();
+        let desired_monitor = event_loop.available_monitors()
+            .find(|monitor| monitor.name().map_or(false, |name| name == "Monitor #12596"))
+            .or_else(|| Some(primary_monitor.unwrap()));
+        window.set_fullscreen(Some(Fullscreen::Borderless(desired_monitor)));
         self.screen_width = window.primary_monitor().unwrap().size().width as usize;
         let size = window.inner_size();
 
@@ -174,8 +198,8 @@ impl ApplicationHandler for ControlFlowDemo {
                         (dcm.yaw, dcm.roll)
                     };
 
-                    self.o_x = yaw;
-                    self.o_y = -roll;
+                    self.o_x = -yaw;
+                    self.o_y = roll;
                 }
                 Key::Named(NamedKey::Escape) => {
                     self.close_requested = true;
@@ -189,7 +213,7 @@ impl ApplicationHandler for ControlFlowDemo {
             }
             WindowEvent::RedrawRequested => {
                 fn calculate_offset(angle: f32, offset: f32, dimension: f32, multiplier: f32) -> isize {
-                    ((dimension * ((-angle + offset) + 1.0) * multiplier) as isize)
+                    (dimension * ((-angle + offset) + 1.0) * multiplier) as isize
                 }
                 if let Some(pixels) = &mut self.pixels {
                     if let Ok(Frame::BGRA(data)) = self.recorder.get_next_frame() {
@@ -213,7 +237,6 @@ impl ApplicationHandler for ControlFlowDemo {
                                 );
                             }
                         } else {
-                            self.pred = Some(data.clone());  // Only clone if necessary
                             process_frame_serial(
                                 &data.data,
                                 frame,
@@ -222,6 +245,7 @@ impl ApplicationHandler for ControlFlowDemo {
                                 current_x_offset,
                                 current_y_offset,
                             );
+                            self.pred = Some(data);
                         }
                     }
                     pixels.render().unwrap();

@@ -23,3 +23,5 @@ hidapi = { version = "2.6.3" }
 byteorder = "1.5.0"
 tinyjson = { version = "2.5.1" }
 bytemuck = { version = "1.18.0" }
+crossbeam-channel = "0.5.13"
+thread-priority = "1.1.0"
