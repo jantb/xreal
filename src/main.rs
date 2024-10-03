@@ -3,6 +3,7 @@ mod ar_drivers {
 }
 
 use ar_drivers::lib::{any_glasses, GlassesEvent};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -66,11 +67,49 @@ fn create_glasses_thread(store: &SharedGlassesStore) {
     });
 
     thread::spawn({
-        move || loop {
+        let buffer_size = 32; // Larger buffer size for smoother response
+        let gyro_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(buffer_size)));
+        let acc_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(buffer_size)));
+
+        move || {
             set_current_thread_priority(ThreadPriority::Max).expect("Failed to set thread priority");
-            if let Ok((gyro, acc, dt)) = receiver.recv() {
-                let mut dcmimu = shared_dcmimu_clone.lock().unwrap();
-                dcmimu.update(gyro, acc, dt);
+            loop {
+                if let Ok((gyro, acc, dt)) = receiver.recv() {
+                    let mut gyro_buffer = gyro_buffer.lock().unwrap();
+                    let mut acc_buffer = acc_buffer.lock().unwrap();
+
+                    if gyro_buffer.len() == buffer_size {
+                        gyro_buffer.pop_front();
+                    }
+                    gyro_buffer.push_back(gyro);
+
+                    if acc_buffer.len() == buffer_size {
+                        acc_buffer.pop_front();
+                    }
+                    acc_buffer.push_back(acc);
+
+                    // Calculating moving average
+                    let average_gyro = gyro_buffer.iter().fold((0.0, 0.0, 0.0), |acc, &(x, y, z)| {
+                        (acc.0 + x, acc.1 + y, acc.2 + z)
+                    });
+                    let average_gyro = (
+                        average_gyro.0 / gyro_buffer.len() as f32,
+                        average_gyro.1 / gyro_buffer.len() as f32,
+                        average_gyro.2 / gyro_buffer.len() as f32,
+                    );
+
+                    let average_acc = acc_buffer.iter().fold((0.0, 0.0, 0.0), |acc, &(x, y, z)| {
+                        (acc.0 + x, acc.1 + y, acc.2 + z)
+                    });
+                    let average_acc = (
+                        average_acc.0 / acc_buffer.len() as f32,
+                        average_acc.1 / acc_buffer.len() as f32,
+                        average_acc.2 / acc_buffer.len() as f32,
+                    );
+
+                    let mut dcmimu = shared_dcmimu_clone.lock().unwrap();
+                    dcmimu.update(average_gyro, average_acc, dt);
+                }
             }
         }
     });
@@ -139,10 +178,7 @@ impl ControlFlowDemo {
 }
 
 impl ApplicationHandler for ControlFlowDemo {
-
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-
-
         let window_attributes = Window::default_attributes().with_title(
             "Xreal renderer",
         ).with_inner_size(winit::dpi::LogicalSize::new(1920.0, 1080.0))
