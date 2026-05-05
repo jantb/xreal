@@ -462,3 +462,148 @@ fn set_black(buffer: &mut [u8]) {
         pixel[3] = 255;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::hint::black_box;
+
+    fn make_bgra_frame(width: usize, height: usize) -> Vec<u8> {
+        let mut frame = vec![0; width * height * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let index = (y * width + x) * 4;
+                frame[index] = x as u8;
+                frame[index + 1] = y as u8;
+                frame[index + 2] = (x + y * 17) as u8;
+                frame[index + 3] = 77;
+            }
+        }
+        frame
+    }
+
+    fn reference_process_frame(
+        frame: &[u8],
+        raw_buffer: &mut [u8],
+        width: usize,
+        screen_width: usize,
+        x_offset: isize,
+        y_offset: isize,
+    ) {
+        let frame_stride = screen_width * 4;
+        let source_height = frame.len() / frame_stride;
+
+        for (y, row) in raw_buffer.chunks_mut(width * 4).enumerate() {
+            let source_y = y as isize + y_offset;
+            for (x, pixel) in row.chunks_mut(4).enumerate() {
+                let source_x = x as isize + x_offset;
+                if source_y < 0
+                    || source_y as usize >= source_height
+                    || source_x < 0
+                    || source_x as usize >= screen_width
+                {
+                    pixel.copy_from_slice(&[0, 0, 0, 255]);
+                    continue;
+                }
+
+                let source_index = source_y as usize * frame_stride + source_x as usize * 4;
+                pixel[0] = frame[source_index + 2];
+                pixel[1] = frame[source_index + 1];
+                pixel[2] = frame[source_index];
+                pixel[3] = 255;
+            }
+        }
+    }
+
+    #[test]
+    fn rolling_average_evicts_old_samples() {
+        let mut average = RollingVec3Average::<3>::new();
+
+        assert_eq!(average.push_average((1.0, 2.0, 3.0)), (1.0, 2.0, 3.0));
+        assert_eq!(average.push_average((3.0, 4.0, 5.0)), (2.0, 3.0, 4.0));
+        assert_eq!(average.push_average((5.0, 6.0, 7.0)), (3.0, 4.0, 5.0));
+        assert_eq!(average.push_average((7.0, 8.0, 9.0)), (5.0, 6.0, 7.0));
+    }
+
+    #[test]
+    fn optimized_frame_processing_matches_reference_across_offsets() {
+        let output_width = 4;
+        let output_height = 3;
+        let screen_width = 6;
+        let source_height = 5;
+        let frame = make_bgra_frame(screen_width, source_height);
+
+        for y_offset in -4..=6 {
+            for x_offset in -5..=7 {
+                let mut expected = vec![19; output_width * output_height * 4];
+                let mut actual = expected.clone();
+
+                reference_process_frame(
+                    &frame,
+                    &mut expected,
+                    output_width,
+                    screen_width,
+                    x_offset,
+                    y_offset,
+                );
+                process_frame_serial(
+                    &frame,
+                    &mut actual,
+                    output_width,
+                    screen_width,
+                    x_offset,
+                    y_offset,
+                );
+
+                assert_eq!(actual, expected, "x_offset={x_offset}, y_offset={y_offset}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "release-mode throughput harness; run with `cargo test --release perf_frame_processing -- --ignored --nocapture`"]
+    fn perf_frame_processing_reports_throughput() {
+        let output_width = 1920;
+        let output_height = 1080;
+        let screen_width = 3840;
+        let source_height = 2160;
+        let iterations = 240;
+        let frame = make_bgra_frame(screen_width, source_height);
+        let mut output = vec![0; output_width * output_height * 4];
+
+        let start = Instant::now();
+        for i in 0..iterations {
+            process_frame_serial(
+                black_box(&frame),
+                black_box(&mut output),
+                output_width,
+                screen_width,
+                640 + (i as isize % 17),
+                120 + (i as isize % 11),
+            );
+        }
+        let elapsed = start.elapsed();
+        let fps = iterations as f64 / elapsed.as_secs_f64();
+        let checksum = output
+            .iter()
+            .step_by(4096)
+            .fold(0u64, |sum, byte| sum.wrapping_add(*byte as u64));
+
+        println!(
+            "process_frame_serial: {iterations} frames in {:.3}s = {:.1} fps ({:.3} ms/frame), checksum={checksum}",
+            elapsed.as_secs_f64(),
+            fps,
+            1000.0 / fps
+        );
+
+        if let Ok(min_fps) = std::env::var("PERF_MIN_FPS") {
+            let min_fps: f64 = min_fps.parse().expect("PERF_MIN_FPS must be numeric");
+            assert!(
+                fps >= min_fps,
+                "throughput {fps:.1} fps is below PERF_MIN_FPS={min_fps}"
+            );
+        }
+
+        assert_ne!(checksum, 0);
+    }
+}
