@@ -66,6 +66,9 @@ impl ARGlasses for NrealAir {
             cmd_id: 0x15,
             ..Default::default()
         })?;
+        if result.is_empty() {
+            return Err(Error::Other("Serial number response was empty"));
+        }
         result.remove(0);
         String::from_utf8(result).map_err(|_| Error::Other("Serial number was not utf-8"))
     }
@@ -204,7 +207,13 @@ impl NrealAir {
             McuPacket {
                 cmd_id: 0x6c05,
                 data,
-            } => Some(GlassesEvent::KeyPress(data[0] - 1)),
+            } => {
+                let key = data
+                    .first()
+                    .and_then(|key| key.checked_sub(1))
+                    .ok_or(Error::Other("Malformed key press packet received"))?;
+                Some(GlassesEvent::KeyPress(key))
+            }
             // NOTE: maybe we should retry in these cases instead of basically reporting timeout,
             //       but we will be called again soon enough.
             McuPacket {
@@ -283,12 +292,21 @@ impl ImuDevice {
     }
 
     fn read_config(&mut self) -> Result<()> {
-        let len = u32::from_le_bytes(self.command(0x14, &[])?.try_into().unwrap());
+        let len_response = self.command(0x14, &[])?;
+        let len_bytes: [u8; 4] = len_response
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Other("Invalid glasses config length response"))?;
+        let len = u32::from_le_bytes(len_bytes) as usize;
         let mut config = Vec::new();
-        while config.len() < len as usize {
+        while config.len() < len {
             let mut config_part = self.command(0x15, &[])?;
+            if config_part.is_empty() {
+                return Err(Error::Other("Invalid glasses config chunk"));
+            }
             config.append(&mut config_part);
         }
+        config.truncate(len);
         let config_as_str = String::from_utf8(config)
             .map_err(|_| Error::Other("Invalid glasses config (not utf-8)"))?;
         self.config_json = config_as_str
@@ -298,75 +316,100 @@ impl ImuDevice {
     }
 
     fn parse_config(&mut self) -> Result<()> {
-        // XXX: This will panic if config is not in expected format.
-        //      should probably return Err() instead.
-        self.displays = Self::parse_display_descriptors(&self.config_json["display"]);
-        let cfg = &self.config_json["IMU"]["device_1"];
-        self.accelerometer_bias = Self::parse_vector(&cfg["accel_bias"]).map(|c| c as f32);
-        self.gyro_bias = Self::parse_vector(&cfg["gyro_bias"]).map(|c| c as f32);
+        let display = Self::json_object_get(&self.config_json, "display")?;
+        self.displays = Some(Self::parse_display_descriptors(display)?);
+
+        let imu = Self::json_object_get(&self.config_json, "IMU")?;
+        let cfg = Self::json_object_get(imu, "device_1")?;
+        self.accelerometer_bias =
+            Self::parse_vector(Self::json_object_get(cfg, "accel_bias")?)?.map(|c| c as f32);
+        self.gyro_bias =
+            Self::parse_vector(Self::json_object_get(cfg, "gyro_bias")?)?.map(|c| c as f32);
         Ok(())
     }
 
-    fn parse_display_descriptors(json: &JsonValue) -> Option<(DisplayMatrices, DisplayMatrices)> {
-        let resolution = &json["resolution"];
+    fn parse_display_descriptors(json: &JsonValue) -> Result<(DisplayMatrices, DisplayMatrices)> {
+        let resolution = Self::json_object_get(json, "resolution")?;
         let resolution = (
-            *resolution[0].get::<f64>().unwrap() as u32,
-            *resolution[1].get::<f64>().unwrap() as u32,
+            Self::json_array_f64(resolution, 0)? as u32,
+            Self::json_array_f64(resolution, 1)? as u32,
         );
 
         let side_descriptor =
-            |p_cfg: &JsonValue, q_cfg: &JsonValue, k_cfg: &JsonValue| -> DisplayMatrices {
-                let translation = Self::parse_vector(p_cfg);
-                let rotation = UnitQuaternion::from_quaternion(Self::parse_quaternion(q_cfg));
-                DisplayMatrices {
-                    intrinsic_matrix: Self::parse_matrix3(k_cfg),
+            |p_cfg: &JsonValue, q_cfg: &JsonValue, k_cfg: &JsonValue| -> Result<DisplayMatrices> {
+                let translation = Self::parse_vector(p_cfg)?;
+                let rotation = UnitQuaternion::from_quaternion(Self::parse_quaternion(q_cfg)?);
+                Ok(DisplayMatrices {
+                    intrinsic_matrix: Self::parse_matrix3(k_cfg)?,
                     resolution,
                     isometry: Translation3::from(translation) * rotation,
-                }
+                })
             };
         let mut left = side_descriptor(
-            &json["target_p_left_display"],
-            &json["target_q_left_display"],
-            &json["k_left_display"],
-        );
+            Self::json_object_get(json, "target_p_left_display")?,
+            Self::json_object_get(json, "target_q_left_display")?,
+            Self::json_object_get(json, "k_left_display")?,
+        )?;
         let mut right = side_descriptor(
-            &json["target_p_right_display"],
-            &json["target_q_right_display"],
-            &json["k_right_display"],
-        );
+            Self::json_object_get(json, "target_p_right_display")?,
+            Self::json_object_get(json, "target_q_right_display")?,
+            Self::json_object_get(json, "k_right_display")?,
+        )?;
         // The calibration seems to be based on a reference point near the right lens.
         // We will center the translation component between the displays.
         let mean = (left.isometry.translation.vector + right.isometry.translation.vector) * 0.5;
         left.isometry.translation.vector -= mean;
         right.isometry.translation.vector -= mean;
-        Some((left, right))
+        Ok((left, right))
     }
 
-    fn parse_vector(json: &JsonValue) -> Vector3<f64> {
-        Vector3::new(
-            *json[0].get::<f64>().unwrap(),
-            *json[1].get::<f64>().unwrap(),
-            *json[2].get::<f64>().unwrap(),
-        )
+    fn parse_vector(json: &JsonValue) -> Result<Vector3<f64>> {
+        Ok(Vector3::new(
+            Self::json_array_f64(json, 0)?,
+            Self::json_array_f64(json, 1)?,
+            Self::json_array_f64(json, 2)?,
+        ))
     }
 
-    fn parse_quaternion(json: &JsonValue) -> Quaternion<f64> {
-        Quaternion::new(
-            *json[3].get::<f64>().unwrap(),
-            *json[0].get::<f64>().unwrap(),
-            *json[1].get::<f64>().unwrap(),
-            *json[2].get::<f64>().unwrap(),
-        )
+    fn parse_quaternion(json: &JsonValue) -> Result<Quaternion<f64>> {
+        Ok(Quaternion::new(
+            Self::json_array_f64(json, 3)?,
+            Self::json_array_f64(json, 0)?,
+            Self::json_array_f64(json, 1)?,
+            Self::json_array_f64(json, 2)?,
+        ))
     }
 
-    fn parse_matrix3(json: &JsonValue) -> Matrix3<f64> {
-        let vals = json
+    fn parse_matrix3(json: &JsonValue) -> Result<Matrix3<f64>> {
+        let values = json
             .get::<Vec<_>>()
-            .unwrap()
+            .ok_or(Error::Other("Invalid glasses config format"))?;
+        if values.len() != 9 {
+            return Err(Error::Other("Invalid glasses matrix config length"));
+        }
+        let vals = values
             .iter()
-            .map(|v| *v.get::<f64>().unwrap())
-            .collect::<Vec<f64>>();
-        Matrix3::from_row_slice(&vals)
+            .map(|v| {
+                v.get::<f64>()
+                    .copied()
+                    .ok_or(Error::Other("Invalid glasses config format"))
+            })
+            .collect::<Result<Vec<f64>>>()?;
+        Ok(Matrix3::from_row_slice(&vals))
+    }
+
+    fn json_array_f64(json: &JsonValue, index: usize) -> Result<f64> {
+        json.get::<Vec<_>>()
+            .and_then(|values| values.get(index))
+            .and_then(|value| value.get::<f64>())
+            .copied()
+            .ok_or(Error::Other("Invalid glasses config format"))
+    }
+
+    fn json_object_get<'a>(json: &'a JsonValue, key: &str) -> Result<&'a JsonValue> {
+        json.get::<std::collections::HashMap<String, JsonValue>>()
+            .and_then(|object| object.get(key))
+            .ok_or(Error::Other("Invalid glasses config format"))
     }
 
     fn command(&self, cmd_id: u8, data: &[u8]) -> Result<Vec<u8>> {
@@ -476,14 +519,22 @@ impl McuPacket {
         if raw_packet.head != 0xfd {
             return None;
         }
+        let length = raw_packet.length as usize;
+        let data_len = length.checked_sub(17)?;
+        if data_len > raw_packet.data.len() {
+            return None;
+        }
         // TODO: maybe check CRC?
         Some(McuPacket {
             cmd_id: raw_packet.cmd_id,
-            data: raw_packet.data[0..(raw_packet.length as usize - 17)].into(),
+            data: raw_packet.data[..data_len].into(),
         })
     }
 
     fn serialize(&self) -> Option<[u8; 0x40]> {
+        if self.data.len() > 42 {
+            return None;
+        }
         let mut data = [0u8; 42];
         data[0..self.data.len()].copy_from_slice(&self.data);
         let mut raw_packet = McuRawPacket {
@@ -527,14 +578,22 @@ impl ImuPacket {
         if raw_packet.head != 0xaa {
             return None;
         }
+        let length = raw_packet.length as usize;
+        let data_len = length.checked_sub(3)?;
+        if data_len > raw_packet.data.len() {
+            return None;
+        }
         // TODO: maybe check CRC?
         Some(ImuPacket {
             cmd_id: raw_packet.cmd_id,
-            data: raw_packet.data[0..(raw_packet.length as usize - 3)].into(),
+            data: raw_packet.data[..data_len].into(),
         })
     }
 
     fn serialize(&self) -> Option<[u8; 0x40]> {
+        if self.data.len() > 56 {
+            return None;
+        }
         let mut data = [0u8; 56];
         data[0..self.data.len()].copy_from_slice(&self.data);
         let mut raw_packet = ImuRawPacket {
@@ -562,4 +621,69 @@ fn open_nreal_endpoint(interface: i32) -> Result<(AirModel, HidDevice)> {
         }
     }
     Err(Error::NotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mcu_packet_with_length(length: u16) -> [u8; 0x40] {
+        let mut data = [0u8; 0x40];
+        data[0] = 0xfd;
+        data[5..7].copy_from_slice(&length.to_le_bytes());
+        data[15..17].copy_from_slice(&0x1234u16.to_le_bytes());
+        data
+    }
+
+    fn imu_packet_with_length(length: u16) -> [u8; 0x40] {
+        let mut data = [0u8; 0x40];
+        data[0] = 0xaa;
+        data[5..7].copy_from_slice(&length.to_le_bytes());
+        data[7] = 0x12;
+        data
+    }
+
+    #[test]
+    fn mcu_packet_rejects_invalid_lengths() {
+        assert!(McuPacket::deserialize(&mcu_packet_with_length(16)).is_none());
+        assert!(McuPacket::deserialize(&mcu_packet_with_length(60)).is_none());
+
+        let packet = McuPacket::deserialize(&mcu_packet_with_length(17)).unwrap();
+        assert_eq!(packet.cmd_id, 0x1234);
+        assert!(packet.data.is_empty());
+    }
+
+    #[test]
+    fn imu_packet_rejects_invalid_lengths() {
+        assert!(ImuPacket::deserialize(&imu_packet_with_length(2)).is_none());
+        assert!(ImuPacket::deserialize(&imu_packet_with_length(60)).is_none());
+
+        let packet = ImuPacket::deserialize(&imu_packet_with_length(3)).unwrap();
+        assert_eq!(packet.cmd_id, 0x12);
+        assert!(packet.data.is_empty());
+    }
+
+    #[test]
+    fn packet_serializers_reject_oversized_payloads() {
+        assert!(McuPacket {
+            cmd_id: 1,
+            data: vec![0; 43],
+        }
+        .serialize()
+        .is_none());
+
+        assert!(ImuPacket {
+            cmd_id: 1,
+            data: vec![0; 57],
+        }
+        .serialize()
+        .is_none());
+    }
+
+    #[test]
+    fn config_parsers_return_errors_for_invalid_values() {
+        assert!(ImuDevice::parse_vector(&JsonValue::Null).is_err());
+        assert!(ImuDevice::parse_matrix3(&JsonValue::Array(vec![JsonValue::Number(1.0)])).is_err());
+        assert!(ImuDevice::parse_display_descriptors(&JsonValue::Null).is_err());
+    }
 }

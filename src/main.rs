@@ -88,8 +88,9 @@ fn create_glasses_thread(store: &SharedGlassesStore) {
         let last_timestamp = Arc::clone(&last_timestamp);
         let sender = sender.clone();
         move || {
-            set_current_thread_priority(ThreadPriority::Max)
-                .expect("Failed to set thread priority");
+            if let Err(err) = set_current_thread_priority(ThreadPriority::Max) {
+                eprintln!("Failed to set glasses reader thread priority: {err}");
+            }
             let mut glasses = match any_glasses() {
                 Ok(glasses) => glasses,
                 Err(_) => return, // Exit if unable to acquire glasses
@@ -135,8 +136,9 @@ fn create_glasses_thread(store: &SharedGlassesStore) {
         let acc_thresh = 0.35f32; // m/s^2 window around |g|
 
         move || {
-            set_current_thread_priority(ThreadPriority::Max)
-                .expect("Failed to set thread priority");
+            if let Err(err) = set_current_thread_priority(ThreadPriority::Max) {
+                eprintln!("Failed to set IMU update thread priority: {err}");
+            }
             loop {
                 // Optional reset request
                 while bias_reset_rx.try_recv().is_ok() {
@@ -228,7 +230,7 @@ struct ControlFlowDemo {
     pixels: Option<Pixels>,
     window: Option<Window>,
     recorder: Capturer,
-    screen_width: usize,
+    output_width: usize,
     store: SharedGlassesStore,
     o_x: f32,
     o_y: f32,
@@ -243,7 +245,7 @@ impl ControlFlowDemo {
             close_requested: false,
             pixels: None,
             window: None,
-            screen_width: 0,
+            output_width: 0,
             recorder,
             store,
             o_x: -0.5,
@@ -271,8 +273,8 @@ impl ApplicationHandler for ControlFlowDemo {
             })
             .or_else(|| Some(primary_monitor.unwrap()));
         window.set_fullscreen(Some(Fullscreen::Borderless(desired_monitor)));
-        self.screen_width = window.primary_monitor().unwrap().size().width as usize;
         let size = window.inner_size();
+        self.output_width = size.width as usize;
 
         let surface_texture = SurfaceTexture::new(size.width, size.height, &window);
         let pixels = Pixels::new(size.width, size.height, surface_texture).unwrap();
@@ -328,6 +330,10 @@ impl ApplicationHandler for ControlFlowDemo {
                     pixels
                         .resize_surface(size.width, size.height)
                         .expect("Resize failed");
+                    pixels
+                        .resize_buffer(size.width, size.height)
+                        .expect("Buffer resize failed");
+                    self.output_width = size.width as usize;
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -354,8 +360,8 @@ impl ApplicationHandler for ControlFlowDemo {
                                 process_frame_serial(
                                     &pred.data,
                                     frame,
-                                    1920,
-                                    self.screen_width,
+                                    self.output_width,
+                                    pred.width as usize,
                                     current_x_offset,
                                     current_y_offset,
                                 );
@@ -364,8 +370,8 @@ impl ApplicationHandler for ControlFlowDemo {
                             process_frame_serial(
                                 &data.data,
                                 frame,
-                                1920,
-                                self.screen_width,
+                                self.output_width,
+                                data.width as usize,
                                 current_x_offset,
                                 current_y_offset,
                             );
