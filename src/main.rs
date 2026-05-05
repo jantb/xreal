@@ -61,7 +61,10 @@ impl<const N: usize> RollingVec3Average<N> {
         self.sum.0 += value.0;
         self.sum.1 += value.1;
         self.sum.2 += value.2;
-        self.next = (self.next + 1) % N;
+        self.next += 1;
+        if self.next == N {
+            self.next = 0;
+        }
 
         let n = self.len as f32;
         (self.sum.0 / n, self.sum.1 / n, self.sum.2 / n)
@@ -605,5 +608,44 @@ mod tests {
         }
 
         assert_ne!(checksum, 0);
+    }
+
+    #[test]
+    #[ignore = "release-mode throughput harness; run with `cargo test --release perf_rolling_average -- --ignored --nocapture`"]
+    fn perf_rolling_average_reports_throughput() {
+        let iterations = 10_000_000;
+        let mut average = RollingVec3Average::<32>::new();
+        let start = Instant::now();
+        let mut checksum = 0.0f32;
+
+        for i in 0..iterations {
+            let input = (
+                (i & 0xff) as f32,
+                ((i >> 8) & 0xff) as f32,
+                ((i >> 16) & 0xff) as f32,
+            );
+            let output = average.push_average(black_box(input));
+            checksum += output.0 + output.1 + output.2;
+        }
+
+        let elapsed = start.elapsed();
+        let samples_per_second = iterations as f64 / elapsed.as_secs_f64();
+        println!(
+            "RollingVec3Average: {iterations} samples in {:.3}s = {:.1} M samples/s, checksum={checksum:.1}",
+            elapsed.as_secs_f64(),
+            samples_per_second / 1_000_000.0
+        );
+
+        if let Ok(min_samples_per_second) = std::env::var("PERF_MIN_ROLLING_SAMPLES_PER_SEC") {
+            let min_samples_per_second: f64 = min_samples_per_second
+                .parse()
+                .expect("PERF_MIN_ROLLING_SAMPLES_PER_SEC must be numeric");
+            assert!(
+                samples_per_second >= min_samples_per_second,
+                "throughput {samples_per_second:.1} samples/s is below PERF_MIN_ROLLING_SAMPLES_PER_SEC={min_samples_per_second}"
+            );
+        }
+
+        assert_ne!(checksum, 0.0);
     }
 }
