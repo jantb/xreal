@@ -2,14 +2,14 @@ mod ar_drivers {
     pub mod lib;
 }
 
-use ar_drivers::lib::{any_glasses, GlassesEvent};
-use std::collections::VecDeque;
+use ar_drivers::lib::{any_glasses, DisplayMode, GlassesEvent};
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use dcmimu::DCMIMU;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -28,6 +28,46 @@ struct SharedGlassesStore {
     dcmimu: Arc<Mutex<DCMIMU>>,
 }
 
+const TARGET_FPS: u32 = 120;
+
+struct RollingVec3Average<const N: usize> {
+    values: [(f32, f32, f32); N],
+    next: usize,
+    len: usize,
+    sum: (f32, f32, f32),
+}
+
+impl<const N: usize> RollingVec3Average<N> {
+    fn new() -> Self {
+        Self {
+            values: [(0.0, 0.0, 0.0); N],
+            next: 0,
+            len: 0,
+            sum: (0.0, 0.0, 0.0),
+        }
+    }
+
+    fn push_average(&mut self, value: (f32, f32, f32)) -> (f32, f32, f32) {
+        if self.len == N {
+            let old = self.values[self.next];
+            self.sum.0 -= old.0;
+            self.sum.1 -= old.1;
+            self.sum.2 -= old.2;
+        } else {
+            self.len += 1;
+        }
+
+        self.values[self.next] = value;
+        self.sum.0 += value.0;
+        self.sum.1 += value.1;
+        self.sum.2 += value.2;
+        self.next = (self.next + 1) % N;
+
+        let n = self.len as f32;
+        (self.sum.0 / n, self.sum.1 / n, self.sum.2 / n)
+    }
+}
+
 // Global channel to request gyro bias reset from UI
 static BIAS_RESET_SENDER: OnceCell<Sender<()>> = OnceCell::new();
 
@@ -42,21 +82,23 @@ fn create_glasses_thread(store: &SharedGlassesStore) {
     let _ = BIAS_RESET_SENDER.set(bias_reset_tx);
 
     thread::spawn({
-        set_current_thread_priority(ThreadPriority::Max).expect("Failed to set thread priority");
         let last_timestamp = Arc::clone(&last_timestamp);
         let sender = sender.clone();
         move || {
+            set_current_thread_priority(ThreadPriority::Max)
+                .expect("Failed to set thread priority");
             let mut glasses = match any_glasses() {
                 Ok(glasses) => glasses,
                 Err(_) => return, // Exit if unable to acquire glasses
             };
+            let _ = glasses.set_display_mode(DisplayMode::HighRefreshRate);
 
             loop {
                 if let Ok(GlassesEvent::AccGyro {
-                              accelerometer,
-                              gyroscope,
-                              timestamp,
-                          }) = glasses.read_event()
+                    accelerometer,
+                    gyroscope,
+                    timestamp,
+                }) = glasses.read_event()
                 {
                     let last_ts = last_timestamp.load(Ordering::Relaxed);
                     if last_ts != 0 {
@@ -69,29 +111,29 @@ fn create_glasses_thread(store: &SharedGlassesStore) {
                     }
                     last_timestamp.store(timestamp, Ordering::Relaxed);
                 }
-                thread::yield_now();
             }
         }
     });
 
     thread::spawn({
-        let buffer_size = 32; // smoothing window
-        let gyro_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(buffer_size)));
-        let acc_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(buffer_size)));
+        const BUFFER_SIZE: usize = 32; // smoothing window
+        let mut gyro_buffer = RollingVec3Average::<BUFFER_SIZE>::new();
+        let mut acc_buffer = RollingVec3Average::<BUFFER_SIZE>::new();
 
         // Gyro bias estimator state
         let mut gyro_bias = (0.0f32, 0.0f32, 0.0f32);
-        let max_bias = 0.2f32;     // rad/s clamp
-        let alpha = 0.003f32;      // learning rate when stationary
-        let decay = 0.0005f32;     // gentle decay when moving
+        let max_bias = 0.2f32; // rad/s clamp
+        let alpha = 0.003f32; // learning rate when stationary
+        let decay = 0.0005f32; // gentle decay when moving
 
         // Stationary detection thresholds
         let gyro_thresh = 0.04f32; // rad/s
         let acc_g = 9.81f32;
-        let acc_thresh = 0.35f32;  // m/s^2 window around |g|
+        let acc_thresh = 0.35f32; // m/s^2 window around |g|
 
         move || {
-            set_current_thread_priority(ThreadPriority::Max).expect("Failed to set thread priority");
+            set_current_thread_priority(ThreadPriority::Max)
+                .expect("Failed to set thread priority");
             loop {
                 // Optional reset request
                 while bias_reset_rx.try_recv().is_ok() {
@@ -99,39 +141,8 @@ fn create_glasses_thread(store: &SharedGlassesStore) {
                 }
 
                 if let Ok((gyro, acc, dt)) = receiver.recv() {
-                    let mut gyro_buffer = gyro_buffer.lock().unwrap();
-                    let mut acc_buffer = acc_buffer.lock().unwrap();
-
-                    if gyro_buffer.len() == buffer_size {
-                        gyro_buffer.pop_front();
-                    }
-                    gyro_buffer.push_back(gyro);
-
-                    if acc_buffer.len() == buffer_size {
-                        acc_buffer.pop_front();
-                    }
-                    acc_buffer.push_back(acc);
-
-                    // Moving averages
-                    let average_gyro_sum = gyro_buffer.iter().fold((0.0, 0.0, 0.0), |a, &(x, y, z)| {
-                        (a.0 + x, a.1 + y, a.2 + z)
-                    });
-                    let n_g = gyro_buffer.len() as f32;
-                    let average_gyro = (
-                        average_gyro_sum.0 / n_g,
-                        average_gyro_sum.1 / n_g,
-                        average_gyro_sum.2 / n_g,
-                    );
-
-                    let average_acc_sum = acc_buffer.iter().fold((0.0, 0.0, 0.0), |a, &(x, y, z)| {
-                        (a.0 + x, a.1 + y, a.2 + z)
-                    });
-                    let n_a = acc_buffer.len() as f32;
-                    let average_acc = (
-                        average_acc_sum.0 / n_a,
-                        average_acc_sum.1 / n_a,
-                        average_acc_sum.2 / n_a,
-                    );
+                    let average_gyro = gyro_buffer.push_average(gyro);
+                    let average_acc = acc_buffer.push_average(acc);
 
                     // Stationary detection
                     let gyro_mag = (average_gyro.0 * average_gyro.0
@@ -190,11 +201,13 @@ fn main() -> Result<(), impl std::error::Error> {
         }
     }
 
-    let store = SharedGlassesStore { dcmimu: Arc::new(Mutex::new(DCMIMU::new())) };
+    let store = SharedGlassesStore {
+        dcmimu: Arc::new(Mutex::new(DCMIMU::new())),
+    };
     create_glasses_thread(&store);
 
     let mut recorder = Capturer::new(Options {
-        fps: 60,
+        fps: TARGET_FPS,
         show_cursor: true,
         show_highlight: true,
         excluded_targets: None,
@@ -212,13 +225,13 @@ struct ControlFlowDemo {
     pixels: Option<Pixels>,
     window: Option<Window>,
     recorder: Capturer,
-    x_offset: f64,
-    y_offset: f64,
     screen_width: usize,
     store: SharedGlassesStore,
     o_x: f32,
     o_y: f32,
     pred: Option<BGRAFrame>,
+    next_frame_at: Instant,
+    target_frame_time: Duration,
 }
 
 impl ControlFlowDemo {
@@ -229,26 +242,30 @@ impl ControlFlowDemo {
             window: None,
             screen_width: 0,
             recorder,
-            x_offset: 0.,
-            y_offset: 0.,
             store,
             o_x: -0.5,
             o_y: -0.9,
             pred: None,
+            next_frame_at: Instant::now(),
+            target_frame_time: Duration::from_nanos(1_000_000_000 / TARGET_FPS as u64),
         }
     }
 }
 
 impl ApplicationHandler for ControlFlowDemo {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window_attributes = Window::default_attributes().with_title(
-            "Xreal renderer",
-        ).with_inner_size(winit::dpi::LogicalSize::new(1920.0, 1080.0));
+        let window_attributes = Window::default_attributes()
+            .with_title("Xreal renderer")
+            .with_inner_size(winit::dpi::LogicalSize::new(1920.0, 1080.0));
         let window = event_loop.create_window(window_attributes).unwrap();
         let primary_monitor = window.primary_monitor();
         let desired_monitor = event_loop
             .available_monitors()
-            .find(|monitor| monitor.name().map_or(false, |name| name == "Monitor #12596"))
+            .find(|monitor| {
+                monitor
+                    .name()
+                    .map_or(false, |name| name == "Monitor #12596")
+            })
             .or_else(|| Some(primary_monitor.unwrap()));
         window.set_fullscreen(Some(Fullscreen::Borderless(desired_monitor)));
         self.screen_width = window.primary_monitor().unwrap().size().width as usize;
@@ -272,7 +289,12 @@ impl ApplicationHandler for ControlFlowDemo {
                 self.close_requested = true;
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent { logical_key: key, state: ElementState::Pressed, .. },
+                event:
+                    KeyEvent {
+                        logical_key: key,
+                        state: ElementState::Pressed,
+                        ..
+                    },
                 ..
             } => match key.as_ref() {
                 Key::Named(NamedKey::ArrowRight) => {
@@ -300,11 +322,18 @@ impl ApplicationHandler for ControlFlowDemo {
             },
             WindowEvent::Resized(size) => {
                 if let Some(pixels) = &mut self.pixels {
-                    pixels.resize_surface(size.width, size.height).expect("Resize failed");
+                    pixels
+                        .resize_surface(size.width, size.height)
+                        .expect("Resize failed");
                 }
             }
             WindowEvent::RedrawRequested => {
-                fn calculate_offset(angle: f32, offset: f32, dimension: f32, multiplier: f32) -> isize {
+                fn calculate_offset(
+                    angle: f32,
+                    offset: f32,
+                    dimension: f32,
+                    multiplier: f32,
+                ) -> isize {
                     (dimension * ((-angle + offset) + 1.0) * multiplier) as isize
                 }
                 if let Some(pixels) = &mut self.pixels {
@@ -341,6 +370,7 @@ impl ApplicationHandler for ControlFlowDemo {
                         }
                     }
                     pixels.render().unwrap();
+                    self.next_frame_at = Instant::now() + self.target_frame_time;
                 }
             }
             _ => (),
@@ -348,11 +378,17 @@ impl ApplicationHandler for ControlFlowDemo {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if !self.close_requested {
+        let now = Instant::now();
+        if !self.close_requested && now >= self.next_frame_at {
             self.window.as_ref().unwrap().request_redraw();
         }
 
-        event_loop.set_control_flow(ControlFlow::Poll);
+        let control_flow = if now >= self.next_frame_at {
+            ControlFlow::Poll
+        } else {
+            ControlFlow::WaitUntil(self.next_frame_at)
+        };
+        event_loop.set_control_flow(control_flow);
 
         if self.close_requested {
             event_loop.exit();
@@ -369,41 +405,60 @@ fn process_frame_serial(
     y_offset: isize,
 ) {
     let frame_stride = screen_width * 4;
+    let output_stride = width * 4;
+    if frame_stride == 0 || output_stride == 0 {
+        return;
+    }
 
-    for (y, row) in raw_buffer.chunks_mut(width * 4).enumerate() {
+    let source_height = frame.len() / frame_stride;
+    let visible_x_start = 0.max(-x_offset).min(width as isize) as usize;
+    let visible_x_end = (screen_width as isize - x_offset)
+        .max(0)
+        .min(width as isize) as usize;
+
+    if visible_x_start >= visible_x_end || source_height == 0 {
+        set_black(raw_buffer);
+        return;
+    }
+
+    let prefix_len = visible_x_start * 4;
+    let visible_len = (visible_x_end - visible_x_start) * 4;
+    let visible_offset = prefix_len;
+    let suffix_offset = visible_offset + visible_len;
+
+    for (y, row) in raw_buffer.chunks_mut(output_stride).enumerate() {
         let row_y = y as isize + y_offset;
 
-        let row_out_of_bounds =
-            row_y < 0 || row_y >= (frame.len() as isize / frame_stride as isize);
-
-        for (x, chunk) in row.chunks_mut(4).enumerate() {
-            let col_x = x as isize + x_offset;
-
-            let pixel_out_of_bounds =
-                col_x < 0 || col_x >= screen_width as isize || row_out_of_bounds;
-
-            if pixel_out_of_bounds {
-                // Set pixel to black
-                chunk[0] = 0; // R
-                chunk[1] = 0; // G
-                chunk[2] = 0; // B
-                chunk[3] = 255; // A
-            } else {
-                let frame_offset = row_y * frame_stride as isize + col_x * 4;
-                let frame_index = frame_offset as usize;
-
-                if frame_index + 3 < frame.len() {
-                    chunk[0] = frame[frame_index + 2]; // R
-                    chunk[1] = frame[frame_index + 1]; // G
-                    chunk[2] = frame[frame_index]; // B
-                    chunk[3] = 255; // A
-                } else {
-                    chunk[0] = 0;
-                    chunk[1] = 0;
-                    chunk[2] = 0;
-                    chunk[3] = 255;
-                }
-            }
+        if row_y < 0 || row_y as usize >= source_height {
+            set_black(row);
+            continue;
         }
+
+        set_black(&mut row[..prefix_len]);
+        set_black(&mut row[suffix_offset..]);
+
+        let source_x = (visible_x_start as isize + x_offset) as usize;
+        let source_index = row_y as usize * frame_stride + source_x * 4;
+        let source_row = &frame[source_index..source_index + visible_len];
+        let visible_row = &mut row[visible_offset..suffix_offset];
+
+        for (source, dest) in source_row
+            .chunks_exact(4)
+            .zip(visible_row.chunks_exact_mut(4))
+        {
+            dest[0] = source[2]; // R
+            dest[1] = source[1]; // G
+            dest[2] = source[0]; // B
+            dest[3] = 255; // A
+        }
+    }
+}
+
+fn set_black(buffer: &mut [u8]) {
+    for pixel in buffer.chunks_exact_mut(4) {
+        pixel[0] = 0;
+        pixel[1] = 0;
+        pixel[2] = 0;
+        pixel[3] = 255;
     }
 }
