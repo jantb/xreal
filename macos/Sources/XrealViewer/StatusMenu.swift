@@ -78,22 +78,52 @@ private final class ActionItem: NSMenuItem {
                         viewer.perform(.setSource(choice))
                     }
                 }))
+        let virtual = settings.source == .virtual
+        let screens = submenu(
+            "Virtual Screens",
+            settings.screens.enumerated().map { index, screen in
+                let item = NSMenuItem(
+                    title: "Screen \(index + 1): \(screen.width) × \(screen.height)", action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                return item
+            } + [
+                .separator(),
+                submenu(
+                    "Add Screen",
+                    virtualScreenSizes.map { size in
+                        ActionItem("\(size.width) × \(size.height)") { [viewer] in
+                            viewer.perform(.addScreen(width: size.width, height: size.height))
+                        }
+                    }),
+                removeScreens(settings.screens),
+                ActionItem("Standard Layout: Wide Above, One Each Side") { [viewer] in
+                    viewer.perform(.standardLayout)
+                },
+                .separator(),
+                hint("Look at a screen and hold ⌃⌥⌘G to carry it"),
+                hint("⌃⌥⌘= brings it closer, ⌃⌥⌘- pushes it away"),
+            ])
+        screens.isEnabled = virtual
+        menu.addItem(screens)
         let projections: [(Projection, String)] = [
             (.crop, "Pixel Exact"), (.flat, "Flat Screen in Room"), (.curved, "Curved Screen in Room"),
         ]
-        let room = viewport.projection != .crop
+        let room = virtual || viewport.projection != .crop
         let roll = ActionItem("Follow Head Tilt", checked: viewport.followsRoll) { [viewer] in
             viewer.perform(.toggleRoll)
         }
         roll.isEnabled = room
-        menu.addItem(
-            submenu(
-                "View",
-                projections.map { projection, title in
-                    ActionItem(title, checked: viewport.projection == projection) { [viewer] in
-                        viewer.perform(.setProjection(projection))
-                    }
-                } + [.separator(), roll]))
+        let view = submenu(
+            "View",
+            projections.map { projection, title in
+                let item = ActionItem(title, checked: viewport.projection == projection) { [viewer] in
+                    viewer.perform(.setProjection(projection))
+                }
+                // Virtual screens always hang flat in the room.
+                item.isEnabled = !virtual
+                return item
+            } + [.separator(), roll])
+        menu.addItem(view)
         let edges: [(EdgeMode, String)] = [(.snap, "Stop at Edge"), (.black, "Show Black Beyond Edge")]
         let edge = submenu(
             "At Screen Edge",
@@ -127,10 +157,11 @@ private final class ActionItem: NSMenuItem {
                         viewer.perform(.setDeadzone(index))
                     }
                 }))
-        menu.addItem(
-            ActionItem("Zoom Out to Show Cursor", checked: settings.followCursor) { [viewer] in
-                viewer.perform(.toggleFollowCursor)
-            })
+        let followCursor = ActionItem("Zoom Out to Show Cursor", checked: settings.followCursor) { [viewer] in
+            viewer.perform(.toggleFollowCursor)
+        }
+        followCursor.isEnabled = !virtual
+        menu.addItem(followCursor)
         menu.addItem(
             ActionItem("Predict Head Motion", checked: settings.prediction) { [viewer] in
                 viewer.perform(.togglePrediction)
@@ -156,6 +187,25 @@ private final class ActionItem: NSMenuItem {
         }
         menu.addItem(.separator())
         menu.addItem(ActionItem("Quit XREAL Viewer", key: "q") { NSApp.terminate(nil) })
+    }
+
+    private func removeScreens(_ screens: [RoomScreen]) -> NSMenuItem {
+        let item = submenu(
+            "Remove Screen",
+            screens.enumerated().map { index, screen in
+                ActionItem("Screen \(index + 1): \(screen.width) × \(screen.height)") { [viewer] in
+                    viewer.perform(.removeScreen(index))
+                }
+            })
+        // At least one screen stays.
+        item.isEnabled = screens.count > 1
+        return item
+    }
+
+    private func hint(_ text: String) -> NSMenuItem {
+        let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
     }
 
     private func submenu(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {

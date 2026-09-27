@@ -1,4 +1,5 @@
 import Metal
+import simd
 import QuartzCore
 import XrealCore
 
@@ -70,7 +71,48 @@ private let shaderSource = """
         pixel = pivot + (pixel - pivot) / u.pivotScaleCurved.z;
         return sampleOrBlack(source, linear, pixel / u.sourcePan.xy);
     }
+
+    // One virtual screen hanging in the room, drawn as a quad.
+    struct Panel {
+        float4x4 viewProjection;
+        float4 center, right, up;  // room coordinates; half extents
+        float4 outline;            // x: 1 to outline the screen
+    };
+
+    struct PanelOut {
+        float4 position [[position]];
+        float2 uv;
+    };
+
+    vertex PanelOut panelVertex(uint id [[vertex_id]], constant Panel &panel [[buffer(0)]]) {
+        // Triangle strip: top left, bottom left, top right, bottom right.
+        float2 corner = float2((id & 2) ? 1 : -1, (id & 1) ? -1 : 1);
+        float3 room = panel.center.xyz + corner.x * panel.right.xyz + corner.y * panel.up.xyz;
+        PanelOut out;
+        out.position = panel.viewProjection * float4(room, 1);
+        out.uv = float2(corner.x * 0.5 + 0.5, 0.5 - corner.y * 0.5);
+        return out;
+    }
+
+    fragment float4 panelFragment(PanelOut in [[stage_in]],
+                                  constant Panel &panel [[buffer(0)]],
+                                  texture2d<float> source [[texture(0)]],
+                                  sampler linear [[sampler(0)]]) {
+        if (panel.outline.x > 0.5) {
+            // About three glasses pixels wide, however far away the screen is.
+            float2 fromEdge = min(in.uv, 1 - in.uv) / fwidth(in.uv);
+            if (min(fromEdge.x, fromEdge.y) < 3) {
+                return float4(0.35, 0.75, 1, 1);
+            }
+        }
+        return float4(source.sample(linear, in.uv).rgb, 1);
+    }
     """
+
+// Clip distances for the room's depth range, in room units (1 is where a
+// screen shows at the glasses' pixel density).
+private let nearClip: Float = 0.05
+private let farClip: Float = 100
 
 enum RendererError: Error {
     case noMetalDevice
@@ -84,7 +126,11 @@ final class Renderer: @unchecked Sendable {
     private let queue: MTLCommandQueue
     private let cropPipeline: MTLRenderPipelineState
     private let spatialPipeline: MTLRenderPipelineState
+    private let panelPipeline: MTLRenderPipelineState
+    private let depthState: MTLDepthStencilState
     private let sampler: MTLSamplerState
+    // Matches the drawable size; recreated when that changes.
+    private var depthTexture: MTLTexture?
 
     init() throws {
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
@@ -104,6 +150,20 @@ final class Renderer: @unchecked Sendable {
         cropPipeline = try pipeline(fragment: "cropFragment")
         spatialPipeline = try pipeline(fragment: "spatialFragment")
 
+        let panelDescriptor = MTLRenderPipelineDescriptor()
+        panelDescriptor.vertexFunction = library.makeFunction(name: "panelVertex")
+        panelDescriptor.fragmentFunction = library.makeFunction(name: "panelFragment")
+        panelDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        panelDescriptor.depthAttachmentPixelFormat = .depth32Float
+        panelPipeline = try device.makeRenderPipelineState(descriptor: panelDescriptor)
+        let depthDescriptor = MTLDepthStencilDescriptor()
+        depthDescriptor.depthCompareFunction = .less
+        depthDescriptor.isDepthWriteEnabled = true
+        guard let depthState = device.makeDepthStencilState(descriptor: depthDescriptor) else {
+            throw RendererError.noMetalDevice
+        }
+        self.depthState = depthState
+
         let samplerDescriptor = MTLSamplerDescriptor()
         samplerDescriptor.minFilter = .linear
         samplerDescriptor.magFilter = .linear
@@ -115,25 +175,41 @@ final class Renderer: @unchecked Sendable {
         self.sampler = sampler
     }
 
-    /// Clears to black when there is nothing to show yet.
-    func draw(to drawable: CAMetalDrawable, frame: CapturedFrame?, geometry: ViewGeometry?) {
+    /// Draws `geometry` from `frames`, one per captured display: the crop and
+    /// spatial views show the first, the room shows each panel's own. Clears
+    /// to black when there is nothing to show yet.
+    func draw(to drawable: CAMetalDrawable, frames: [CapturedFrame?], geometry: ViewGeometry?) {
         guard let commandBuffer = queue.makeCommandBuffer() else { return }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         pass.colorAttachments[0].storeAction = .store
+        if case .room = geometry {
+            pass.depthAttachment.texture = depthTexture(matching: drawable.texture)
+            pass.depthAttachment.loadAction = .clear
+            pass.depthAttachment.clearDepth = 1
+            pass.depthAttachment.storeAction = .dontCare
+        }
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
+        encoder.setFragmentSamplerState(sampler, index: 0)
 
-        if let frame, let geometry {
-            var rect = SIMD4<Float>(0, 0, 1, 1)
-            switch geometry {
-            case .crop(let crop):
+        switch geometry {
+        case nil:
+            break
+        case .crop(let crop):
+            if let frame = frames.first ?? nil {
                 let width = Float(frame.width)
                 let height = Float(frame.height)
-                rect = SIMD4(crop.x / width, crop.y / height, crop.width / width, crop.height / height)
+                var rect = SIMD4(crop.x / width, crop.y / height, crop.width / width, crop.height / height)
                 encoder.setRenderPipelineState(cropPipeline)
-            case .spatial(let view):
+                encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
+                encoder.setFragmentTexture(frame.texture, index: 0)
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            }
+        case .spatial(let view):
+            if let frame = frames.first ?? nil {
+                var rect = SIMD4<Float>(0, 0, 1, 1)
                 var uniforms = [
                     SIMD4(view.rotation.columns.0, 0),
                     SIMD4(view.rotation.columns.1, 0),
@@ -143,18 +219,65 @@ final class Renderer: @unchecked Sendable {
                     SIMD4(lowHalf: view.pivot, highHalf: SIMD2(view.scale, view.curved ? 1 : 0)),
                 ]
                 encoder.setRenderPipelineState(spatialPipeline)
+                encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
                 encoder.setFragmentBytes(
                     &uniforms, length: MemoryLayout<SIMD4<Float>>.stride * uniforms.count, index: 0)
+                encoder.setFragmentTexture(frame.texture, index: 0)
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             }
-            encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
-            encoder.setFragmentTexture(frame.texture, index: 0)
-            encoder.setFragmentSamplerState(sampler, index: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        case .room(let room):
+            encoder.setRenderPipelineState(panelPipeline)
+            encoder.setDepthStencilState(depthState)
+            let viewProjection = Self.viewProjection(room)
+            for panel in room.panels {
+                guard panel.source < frames.count, let frame = frames[panel.source] else { continue }
+                var uniforms = PanelUniforms(
+                    viewProjection: viewProjection, center: SIMD4(panel.center, 1), right: SIMD4(panel.right, 0),
+                    up: SIMD4(panel.up, 0), outline: SIMD4(panel.highlighted ? 1 : 0, 0, 0, 0))
+                encoder.setVertexBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
+                encoder.setFragmentBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
+                encoder.setFragmentTexture(frame.texture, index: 0)
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            }
         }
         encoder.endEncoding()
-        // The capture surface must not be recycled while the GPU still reads it.
-        commandBuffer.addCompletedHandler { _ in withExtendedLifetime(frame) {} }
+        // The capture surfaces must not be recycled while the GPU still reads them.
+        commandBuffer.addCompletedHandler { _ in withExtendedLifetime(frames) {} }
         commandBuffer.present(drawable)
         commandBuffer.commit()
+    }
+
+    private struct PanelUniforms {
+        var viewProjection: simd_float4x4
+        var center: SIMD4<Float>
+        var right: SIMD4<Float>
+        var up: SIMD4<Float>
+        var outline: SIMD4<Float>
+    }
+
+    /// Room coordinates to clip space: into the head frame, then a
+    /// perspective projection over the view's field of view with depth
+    /// from 0 at `nearClip` to 1 at `farClip`.
+    private static func viewProjection(_ room: RoomView) -> simd_float4x4 {
+        let r = room.headRotation.transpose
+        let view = simd_float4x4(
+            SIMD4(r.columns.0, 0), SIMD4(r.columns.1, 0), SIMD4(r.columns.2, 0), SIMD4(0, 0, 0, 1))
+        let depthScale = farClip / (nearClip - farClip)
+        let projection = simd_float4x4(
+            SIMD4(1 / room.tanHalfFov.x, 0, 0, 0), SIMD4(0, 1 / room.tanHalfFov.y, 0, 0),
+            SIMD4(0, 0, depthScale, -1), SIMD4(0, 0, nearClip * depthScale, 0))
+        return projection * view
+    }
+
+    private func depthTexture(matching target: MTLTexture) -> MTLTexture? {
+        if let depthTexture, depthTexture.width == target.width, depthTexture.height == target.height {
+            return depthTexture
+        }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .depth32Float, width: target.width, height: target.height, mipmapped: false)
+        descriptor.usage = .renderTarget
+        descriptor.storageMode = .private
+        depthTexture = device.makeTexture(descriptor: descriptor)
+        return depthTexture
     }
 }

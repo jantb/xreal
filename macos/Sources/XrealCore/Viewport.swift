@@ -121,6 +121,7 @@ public struct SpatialView: Sendable {
 public enum ViewGeometry: Sendable {
     case crop(ViewportRect)
     case spatial(SpatialView)
+    case room(RoomView)
 
     /// Whether `point`, in source pixels, is inside the view shrunk to
     /// `margin` (0 to 1) of its size.
@@ -134,6 +135,9 @@ public enum ViewGeometry: Sendable {
         case .spatial(let view):
             guard let output = view.outputPoint(ofSource: point) else { return false }
             return abs(output.x) <= margin && abs(output.y) <= margin
+        case .room:
+            // Several screens have no single source to find a point in.
+            return false
         }
     }
 }
@@ -308,6 +312,29 @@ public struct ViewportController: Sendable {
         }
     }
 
+    /// Turns head directions into room directions, for the room
+    /// projections.
+    public var headRotation: simd_float3x3 {
+        let roll = followsRoll ? offsetRoll : 0
+        return rotationY(offsetYaw * sensitivity) * rotationX(-offsetPitch * sensitivity) * rotationZ(-roll)
+    }
+
+    /// The virtual screens around the viewer, outlining the one at
+    /// `highlighted`. Screens not placed yet are left out.
+    public func roomView(
+        screens: [RoomScreen], outputWidth: Int, outputHeight: Int, highlighted: Int?
+    ) -> RoomView {
+        let tanX = tan(horizontalFov * 0.5) / zoom
+        let aspect = Float(max(outputHeight, 1)) / Float(max(outputWidth, 1))
+        let panels = screens.enumerated().compactMap { index, screen -> RoomView.Panel? in
+            guard let placement = screen.placement else { return nil }
+            let (center, right, up) = placement.frame(width: screen.width, height: screen.height)
+            return RoomView.Panel(
+                source: index, center: center, right: right, up: up, highlighted: index == highlighted)
+        }
+        return RoomView(headRotation: headRotation, tanHalfFov: SIMD2(tanX, tanX * aspect), panels: panels)
+    }
+
     public func spatialView(
         outputWidth: Int, outputHeight: Int, sourceWidth: Int, sourceHeight: Int, scale: Float = 1
     ) -> SpatialView {
@@ -319,11 +346,8 @@ public struct ViewportController: Sendable {
         // the view when looking straight at it.
         let sourcePixelsPerRadian = outputWidth * 0.5 / tanX * zoom
 
-        let yaw = offsetYaw * sensitivity
-        let pitch = offsetPitch * sensitivity
-        let roll = followsRoll ? offsetRoll : 0
         var view = SpatialView(
-            rotation: rotationY(yaw) * rotationX(-pitch) * rotationZ(-roll),
+            rotation: headRotation,
             tanHalfFov: SIMD2(tanX, tanX * outputHeight / outputWidth),
             screenSize: sourceSize / sourcePixelsPerRadian, sourceSize: sourceSize,
             curved: projection == .curved, pan: SIMD2(manualX, manualY))

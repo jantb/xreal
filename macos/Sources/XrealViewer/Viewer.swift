@@ -1,6 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
 import Synchronization
+import simd
 import XrealCore
 
 private let captureFps = 120
@@ -8,27 +9,31 @@ private let captureFps = 120
 private let glassesDisplayDelay = 0.007
 private let sensitivityStep: Float = 1.05
 private let virtualScreenTimeout = 10.0
+// Each step of bringing a screen closer or pushing it away.
+private let distanceStep: Float = 1.1
+// How long a screen stays outlined after it was moved closer or away.
+private let outlineTime = 1.0
+// macOS nudges displays apart after an arrangement is applied. Where they
+// sit this long after is the baseline; later moves are the user's.
+private let arrangementSettleTime = 2.0
+
+/// Virtual screen sizes that macOS 27 creates as asked. Nearby standard
+/// sizes such as 3840 × 2160, 5120 × 2880 or 5760 × 2160 are refused or come
+/// up smaller.
+let virtualScreenSizes: [(width: Int, height: Int)] = [(1920, 1080), (2880, 1620), (3832, 2160), (5120, 1440), (5752, 2160)]
 
 /// Something the glasses can show.
 struct SourceChoice: Sendable {
     var title: String
     var source: CaptureSource
-    var size: (width: Int, height: Int)?
 
-    // Sizes macOS 27 creates as asked. Nearby standard sizes such as
-    // 3840x2160, 5120x2880 or 5760x2160 are refused or come up smaller.
     static let all = [
         SourceChoice(title: "Mirror Main Display", source: .mirror),
-        SourceChoice(title: "Virtual Screen 2880 × 1620", source: .virtual, size: (2880, 1620)),
-        SourceChoice(title: "Virtual Screen 3832 × 2160", source: .virtual, size: (3832, 2160)),
-        SourceChoice(title: "Virtual Screen 5120 × 1440 (Wide)", source: .virtual, size: (5120, 1440)),
-        SourceChoice(title: "Virtual Screen 5752 × 2160", source: .virtual, size: (5752, 2160)),
+        SourceChoice(title: "Virtual Screens", source: .virtual),
     ]
 
     func isSelected(in settings: Settings) -> Bool {
-        guard source == settings.source else { return false }
-        guard let size else { return true }
-        return size.width == settings.virtualWidth && size.height == settings.virtualHeight
+        source == settings.source
     }
 }
 
@@ -54,6 +59,14 @@ enum ViewerCommand {
     case pan(dx: Float, dy: Float)
     case setSource(SourceChoice)
     case toggleSource
+    case addScreen(width: Int, height: Int)
+    case removeScreen(Int)
+    case standardLayout
+    /// Picks up (true) or lets go of (false) the screen being looked at.
+    case grab(Bool)
+    /// Brings the screen being looked at or carried closer (true) or pushes
+    /// it away (false).
+    case moveScreen(closer: Bool)
 }
 
 /// Everything both the render thread and the main thread (menu, keys) use.
@@ -68,8 +81,17 @@ struct ViewerState: Sendable {
     var lastPose = HeadPose()
     var sourceDescription = "SOURCE STARTING"
     /// The captured display in global coordinates (points, top-left
-    /// origin), to find the cursor on it.
+    /// origin), to find the cursor on it. Mirror mode only.
     var sourceBounds: CGRect?
+    /// One per captured display: the mirrored one, or each virtual screen in
+    /// the order of `settings.screens`.
+    var captures: [LatestFrame] = []
+    /// The virtual screen being carried by the head, and how far away it is.
+    var grab: ScreenGrab?
+    var grabDistance: Float = 1
+    /// The virtual screen looked at in the latest frame.
+    var lookedAt: Int?
+    var outlineUntil = 0.0
 
     // The latest frame, for the status lines.
     var stats = RenderStats(now: monotonicNow())
@@ -94,19 +116,54 @@ struct ViewerState: Sendable {
         viewport.recenter(lastPose)
     }
 
+    /// Picks up the screen being looked at. Returns false if there is none.
+    mutating func startGrab() -> Bool {
+        guard settings.source == .virtual, grab == nil, let index = lookedAt,
+            settings.screens.indices.contains(index), let placement = settings.screens[index].placement
+        else { return false }
+        grab = ScreenGrab(index: index, placement: placement, headRotation: viewport.headRotation)
+        grabDistance = placement.distance
+        return true
+    }
+
+    /// Lets go of the carried screen where it is now. Returns false if none
+    /// was carried.
+    mutating func endGrab() -> Bool {
+        guard let grab else { return false }
+        settings.screens[grab.index].placement = grab.placement(
+            headRotation: viewport.headRotation, distance: grabDistance)
+        self.grab = nil
+        return true
+    }
+
+    mutating func moveScreen(closer: Bool, now: Double) {
+        let factor = closer ? 1 / distanceStep : distanceStep
+        if grab != nil {
+            grabDistance = ScreenPlacement(direction: SIMD3(0, 0, -1), distance: grabDistance * factor).distance
+        } else if let index = lookedAt, settings.screens.indices.contains(index),
+            let placement = settings.screens[index].placement
+        {
+            settings.screens[index].placement = placement.movedAway(by: factor)
+        } else {
+            return
+        }
+        outlineUntil = now + outlineTime
+    }
+
     /// Moves on to the frame that reaches the display at `presentingAt`, in
-    /// `monotonicNow` time. `cursor` is the mouse in global coordinates.
+    /// `monotonicNow` time. `frameSizes` holds the size of the latest frame
+    /// of each capture, and `cursor` is the mouse in global coordinates.
     /// Returns what to draw, and whether the gyro bias changed and should
     /// be saved.
     mutating func advance(
         now: Double, dt: Float, presentingAt: Double, snapshot: TrackingSnapshot, captureGeneration: UInt64,
-        newFrame: Bool, sourceSize: (width: Int, height: Int)?, output: (width: Int, height: Int),
+        newFrame: Bool, frameSizes: [(width: Int, height: Int)?], output: (width: Int, height: Int),
         cursor: CGPoint?
     ) -> (geometry: ViewGeometry?, biasChanged: Bool) {
         stats.tick(now: now, captureGeneration: captureGeneration)
         self.snapshot = snapshot
         self.newFrame = newFrame
-        self.sourceSize = sourceSize
+        self.sourceSize = frameSizes.first ?? nil
         self.output = output
 
         let biasChanged = snapshot.biasRevision != biasRevisionSaved
@@ -122,6 +179,11 @@ struct ViewerState: Sendable {
             viewport.recenter(pose)
         }
         viewport.track(pose: pose, dt: dt)
+
+        if settings.source == .virtual {
+            geometry = .room(roomView(now: now, output: output, frameSizes: frameSizes))
+            return (geometry, biasChanged)
+        }
 
         guard let sourceSize else {
             geometry = nil
@@ -147,6 +209,22 @@ struct ViewerState: Sendable {
         }
         self.geometry = visible
         return (visible, biasChanged)
+    }
+
+    private mutating func roomView(
+        now: Double, output: (width: Int, height: Int), frameSizes: [(width: Int, height: Int)?]
+    ) -> RoomView {
+        let rotation = viewport.headRotation
+        if let grab {
+            settings.screens[grab.index].placement = grab.placement(headRotation: rotation, distance: grabDistance)
+        }
+        lookedAt = grab?.index ?? screenLooked(at: rotation * SIMD3(0, 0, -1), among: settings.screens)
+        let outlined = grab != nil || now < outlineUntil ? lookedAt : nil
+        var room = viewport.roomView(
+            screens: settings.screens, outputWidth: output.width, outputHeight: output.height, highlighted: outlined)
+        // Screens still starting up have nothing to show yet.
+        room.panels.removeAll { $0.source >= frameSizes.count || frameSizes[$0.source] == nil }
+        return room
     }
 
     private func sourcePixel(of point: CGPoint, sourceSize: (width: Int, height: Int)) -> SIMD2<Float>? {
@@ -178,19 +256,18 @@ final class SharedState: Sendable {
 final class FrameLoop: @unchecked Sendable {
     private let shared: SharedState
     private let tracking: Tracking
-    private let latest: LatestFrame
     private let renderer: Renderer
     /// Set before the first frame; called on the display link thread.
     var onBiasChanged: @Sendable () -> Void = {}
     // Touched only on the display link thread.
-    private var frame: CapturedFrame?
-    private var frameGeneration: UInt64 = 0
+    private var sources: [ObjectIdentifier] = []
+    private var frames: [CapturedFrame?] = []
+    private var generations: [UInt64] = []
     private var lastRenderAt = monotonicNow()
 
-    init(shared: SharedState, tracking: Tracking, latest: LatestFrame, renderer: Renderer) {
+    init(shared: SharedState, tracking: Tracking, renderer: Renderer) {
         self.shared = shared
         self.tracking = tracking
-        self.latest = latest
         self.renderer = renderer
     }
 
@@ -199,25 +276,37 @@ final class FrameLoop: @unchecked Sendable {
         let dt = Float(min(max(now - lastRenderAt, 0), 0.1))
         lastRenderAt = now
 
-        let current = latest.current()
-        let newFrame = current.generation != frameGeneration
-        if newFrame {
-            frame = current.frame
-            frameGeneration = current.generation
+        let captures = shared.mutex.withLock { $0.captures }
+        let ids = captures.map(ObjectIdentifier.init)
+        if ids != sources {
+            sources = ids
+            frames = Array(repeating: nil, count: captures.count)
+            generations = Array(repeating: 0, count: captures.count)
+        }
+        var newFrame = false
+        var captureGeneration: UInt64 = 0
+        for (index, capture) in captures.enumerated() {
+            let current = capture.current()
+            captureGeneration &+= current.generation
+            if current.generation != generations[index] {
+                frames[index] = current.frame
+                generations[index] = current.generation
+                newFrame = true
+            }
         }
         let cursor = CGEvent(source: nil)?.location
         let output = (width: drawable.texture.width, height: drawable.texture.height)
-        let sourceSize = frame.map { (width: $0.width, height: $0.height) }
+        let frameSizes = frames.map { frame in frame.map { (width: $0.width, height: $0.height) } }
 
         // Sample the pose as late as possible, just before building the frame.
         let snapshot = tracking.snapshot()
         let result = shared.mutex.withLock { state in
             state.advance(
                 now: now, dt: dt, presentingAt: presentingAt, snapshot: snapshot,
-                captureGeneration: current.generation, newFrame: newFrame, sourceSize: sourceSize, output: output,
+                captureGeneration: captureGeneration, newFrame: newFrame, frameSizes: frameSizes, output: output,
                 cursor: cursor)
         }
-        renderer.draw(to: drawable, frame: frame, geometry: result.geometry)
+        renderer.draw(to: drawable, frames: frames, geometry: result.geometry)
         if result.biasChanged {
             onBiasChanged()
         }
@@ -229,24 +318,28 @@ final class FrameLoop: @unchecked Sendable {
 @MainActor final class Viewer {
     private let shared: SharedState
     private let tracking: Tracking
-    private let capture: ScreenCapture
+    private let device: MTLDevice
     private let window: GlassesWindow
     private let displayLink: DisplayLinkThread
-    private var virtualScreen: VirtualScreen?
+    private var captures: [ScreenCapture] = []
+    private var virtualScreens: [VirtualScreen] = []
     private var sourceDisplayID: CGDirectDisplayID?
     private var sourceTask: Task<Void, Never>?
-    private var recenterHotKey: GlobalHotKey?
+    private var hotKeys: [GlobalHotKey] = []
+    /// Where the virtual screens sat once macOS settled the last
+    /// arrangement; nil while it is settling.
+    private var settledFrames: [CGRect]?
+    private var settleTask: Task<Void, Never>?
 
     init(settings: Settings) throws {
         let shared = SharedState(ViewerState(settings: settings))
         let tracking = Tracking(initialBias: settings.gyroBias)
         let renderer = try Renderer()
-        let capture = try ScreenCapture(device: renderer.device)
         self.shared = shared
         self.tracking = tracking
-        self.capture = capture
+        device = renderer.device
 
-        let frameLoop = FrameLoop(shared: shared, tracking: tracking, latest: capture.latest, renderer: renderer)
+        let frameLoop = FrameLoop(shared: shared, tracking: tracking, renderer: renderer)
         displayLink = DisplayLinkThread { drawable, presentingAt in
             frameLoop.render(to: drawable, presentingAt: presentingAt)
         }
@@ -254,9 +347,19 @@ final class FrameLoop: @unchecked Sendable {
         frameLoop.onBiasChanged = { [weak self] in Task { @MainActor in self?.saveSettings() } }
 
         window.view.onKey = { [unowned self] event in handleKey(event) }
-        recenterHotKey = GlobalHotKey(
-            keyCode: kVK_ANSI_C, modifiers: controlKey | optionKey | cmdKey
-        ) { [unowned self] in perform(.recenter) }
+        let modifiers = controlKey | optionKey | cmdKey
+        hotKeys = [
+            GlobalHotKey(keyCode: kVK_ANSI_C, modifiers: modifiers) { [unowned self] in perform(.recenter) },
+            GlobalHotKey(
+                keyCode: kVK_ANSI_G, modifiers: modifiers, onPress: { [unowned self] in perform(.grab(true)) },
+                onRelease: { [unowned self] in perform(.grab(false)) }),
+            GlobalHotKey(keyCode: kVK_ANSI_Equal, modifiers: modifiers) { [unowned self] in
+                perform(.moveScreen(closer: true))
+            },
+            GlobalHotKey(keyCode: kVK_ANSI_Minus, modifiers: modifiers) { [unowned self] in
+                perform(.moveScreen(closer: false))
+            },
+        ]
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -294,6 +397,8 @@ final class FrameLoop: @unchecked Sendable {
     func perform(_ command: ViewerCommand) {
         var persist = true
         var restartSource = false
+        var arrange = false
+        var removedScreen: Int?
         shared.mutex.withLock { state in
             switch command {
             case .recenter:
@@ -327,15 +432,49 @@ final class FrameLoop: @unchecked Sendable {
                 persist = false
             case .setSource(let choice):
                 state.settings.source = choice.source
-                if let size = choice.size {
-                    state.settings.virtualWidth = size.width
-                    state.settings.virtualHeight = size.height
-                }
                 restartSource = true
             case .toggleSource:
                 state.settings.source = state.settings.source == .mirror ? .virtual : .mirror
                 restartSource = true
+            case .addScreen(let width, let height):
+                state.settings.screens.append(RoomScreen(width: width, height: height))
+                state.settings.source = .virtual
+                restartSource = true
+            case .removeScreen(let index):
+                guard state.settings.screens.count > 1, state.settings.screens.indices.contains(index) else {
+                    persist = false
+                    return
+                }
+                state.grab = nil
+                state.lookedAt = nil
+                state.settings.screens.remove(at: index)
+                removedScreen = index
+                restartSource = true
+            case .standardLayout:
+                let main = CGDisplayBounds(Displays.mirrorSource())
+                let frames = standardArrangement(for: state.settings.screens, around: main)
+                for (index, frame) in frames.enumerated() {
+                    state.settings.screens[index].placement = ScreenPlacement(arrangedAt: frame, around: main)
+                }
+                arrange = true
+            case .grab(let pickUp):
+                // Letting go ends the move; the arrangement follows the room.
+                arrange = pickUp ? false : state.endGrab()
+                persist = arrange
+                if pickUp {
+                    _ = state.startGrab()
+                }
+            case .moveScreen(let closer):
+                state.moveScreen(closer: closer, now: monotonicNow())
             }
+        }
+        // The screens after a removed one keep their displays, and so their
+        // place in the room and in macOS.
+        if let removedScreen, virtualScreens.indices.contains(removedScreen) {
+            virtualScreens.remove(at: removedScreen)
+        }
+        if arrange {
+            arrangeVirtualScreens()
         }
         if persist {
             saveSettings()
@@ -349,6 +488,60 @@ final class FrameLoop: @unchecked Sendable {
         window.place()
         let bounds = sourceDisplayID.map(CGDisplayBounds)
         shared.mutex.withLock { $0.sourceBounds = bounds }
+        followArrangement()
+    }
+
+    /// Moves virtual screens in the room to where they were dragged in
+    /// System Settings > Displays > Arrange.
+    private func followArrangement() {
+        guard let settled = settledFrames else { return }
+        let frames = virtualScreens.map { CGDisplayBounds($0.displayID) }
+        guard frames.count == settled.count else { return }
+        settledFrames = frames
+        let main = CGDisplayBounds(Displays.mirrorSource())
+        let moved = shared.mutex.withLock { state -> Bool in
+            guard state.settings.source == .virtual, state.grab == nil else { return false }
+            var moved = false
+            for (index, frame) in frames.enumerated() where index < state.settings.screens.count {
+                guard frame != settled[index], !frame.isEmpty,
+                    let placement = state.settings.screens[index].placement
+                else { continue }
+                state.settings.screens[index].placement = ScreenPlacement(
+                    direction: ScreenPlacement(arrangedAt: frame, around: main).direction,
+                    distance: placement.distance)
+                moved = true
+            }
+            return moved
+        }
+        if moved {
+            saveSettings()
+        }
+    }
+
+    /// Arranges the virtual screens in macOS the way they hang in the room
+    /// around the main display, so the mouse crosses between displays where
+    /// the eye expects.
+    private func arrangeVirtualScreens() {
+        let screens = shared.mutex.withLock { $0.settings.screens }
+        let main = CGDisplayBounds(Displays.mirrorSource())
+        var config: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&config) == .success, let config else { return }
+        for (screen, display) in zip(screens, virtualScreens) {
+            guard let placement = screen.placement else { continue }
+            let origin = placement.arrangedOrigin(width: screen.width, height: screen.height, around: main)
+            CGConfigureDisplayOrigin(config, display.displayID, Int32(origin.x), Int32(origin.y))
+        }
+        let result = CGCompleteDisplayConfiguration(config, .forSession)
+        if result != .success {
+            eprint("Could not arrange the virtual screens: \(result.rawValue)")
+        }
+        settledFrames = nil
+        settleTask?.cancel()
+        settleTask = Task {
+            try? await Task.sleep(for: .seconds(arrangementSettleTime))
+            guard !Task.isCancelled else { return }
+            settledFrames = virtualScreens.map { CGDisplayBounds($0.displayID) }
+        }
     }
 
     // MARK: Source
@@ -358,62 +551,111 @@ final class FrameLoop: @unchecked Sendable {
         sourceTask = Task { await switchSource() }
     }
 
-    private func setSource(description: String, displayID: CGDirectDisplayID?) {
+    private func setSource(description: String, displayID: CGDirectDisplayID?, captures: [ScreenCapture]) {
         sourceDisplayID = displayID
+        self.captures = captures
         let bounds = displayID.map(CGDisplayBounds)
+        let latest = captures.map(\.latest)
         shared.mutex.withLock { state in
             state.sourceDescription = description
             state.sourceBounds = bounds
+            state.captures = latest
         }
     }
 
     private func switchSource() async {
-        await capture.stop()
-        setSource(description: "SOURCE STARTING", displayID: nil)
+        for capture in captures {
+            await capture.stop()
+        }
+        setSource(description: "SOURCE STARTING", displayID: nil, captures: [])
         let settings = shared.mutex.withLock { $0.settings }
         switch settings.source {
         case .mirror:
-            virtualScreen = nil
-            await startCapture(displayID: Displays.mirrorSource(), description: "MIRROR MAIN DISPLAY")
+            virtualScreens = []
+            let displayID = Displays.mirrorSource()
+            let capture = await startCapture(displayID: displayID, pixelSize: Displays.pixelSize(of: displayID))
+            guard !Task.isCancelled else { return }
+            setSource(description: capture.1 ?? "MIRROR MAIN DISPLAY", displayID: displayID, captures: [capture.0])
         case .virtual:
-            let requested = (width: settings.virtualWidth, height: settings.virtualHeight)
-            if let existing = virtualScreen, existing.width != requested.width || existing.height != requested.height {
-                virtualScreen = nil
-            }
-            if virtualScreen == nil {
-                setSource(description: "CREATING VIRTUAL SCREEN \(requested.width)X\(requested.height)", displayID: nil)
-                virtualScreen = VirtualScreen(width: requested.width, height: requested.height)
-            }
-            guard let screen = virtualScreen,
-                let size = await ScreenCapture.shareableSize(of: screen.displayID, timeout: virtualScreenTimeout)
-            else {
-                virtualScreen = nil
-                await startCapture(
-                    displayID: Displays.mirrorSource(),
-                    description: "VIRTUAL SCREEN \(requested.width)X\(requested.height) DID NOT COME ONLINE - MIRRORING")
-                return
-            }
-            // macOS sometimes brings a virtual screen up smaller than asked.
-            let shrunk = size != requested ? " (ASKED FOR \(requested.width)X\(requested.height))" : ""
-            await startCapture(
-                displayID: screen.displayID, pixelSize: size,
-                description: "VIRTUAL SCREEN \(size.width)X\(size.height)\(shrunk)")
+            await startVirtualScreens(settings.screens)
         }
     }
 
+    private func startVirtualScreens(_ screens: [RoomScreen]) async {
+        setSource(description: "CREATING \(screens.count) VIRTUAL SCREENS", displayID: nil, captures: [])
+        // Screens whose size is unchanged are kept, so they stay put.
+        var kept: [VirtualScreen?] = []
+        for (index, screen) in screens.enumerated() {
+            if index < virtualScreens.count, virtualScreens[index].width == screen.width,
+                virtualScreens[index].height == screen.height
+            {
+                kept.append(virtualScreens[index])
+            } else {
+                kept.append(VirtualScreen(index: index, width: screen.width, height: screen.height))
+            }
+        }
+        guard kept.allSatisfy({ $0 != nil }) else {
+            // Without every display the rest would pair with the wrong screens.
+            virtualScreens = []
+            setSource(description: "MACOS REFUSED A VIRTUAL SCREEN - TRY ANOTHER SIZE", displayID: nil, captures: [])
+            return
+        }
+        virtualScreens = kept.compactMap { $0 }
+
+        var frames: [CGRect?] = []
+        for screen in virtualScreens {
+            frames.append(await ScreenCapture.shareableFrame(of: screen.displayID, timeout: virtualScreenTimeout))
+            guard !Task.isCancelled else { return }
+        }
+        // New screens take their place in the standard layout; macOS's
+        // arrangement then follows the room.
+        let main = CGDisplayBounds(Displays.mirrorSource())
+        shared.mutex.withLock { state in
+            let standard = standardArrangement(for: state.settings.screens, around: main)
+            for (index, frame) in standard.enumerated() where state.settings.screens[index].placement == nil {
+                state.settings.screens[index].placement = ScreenPlacement(arrangedAt: frame, around: main)
+            }
+        }
+        arrangeVirtualScreens()
+        saveSettings()
+
+        var started: [ScreenCapture] = []
+        var problems: [String] = []
+        for (index, screen) in virtualScreens.enumerated() {
+            let (capture, problem) = await startCapture(
+                displayID: screen.displayID, pixelSize: (screen.width, screen.height))
+            guard !Task.isCancelled else { return }
+            started.append(capture)
+            if frames[index] == nil {
+                problems.append("SCREEN \(index + 1) DID NOT COME ONLINE")
+            } else if let problem {
+                problems.append(problem)
+            }
+        }
+        let sizes = screens.map { "\($0.width)X\($0.height)" }.joined(separator: ", ")
+        setSource(
+            description: problems.first ?? "VIRTUAL SCREENS \(sizes)", displayID: nil, captures: started)
+    }
+
+    /// Starts capturing `displayID`. The capture is returned even when it
+    /// fails, so captures stay in step with the screens; the second value
+    /// then says what went wrong.
     private func startCapture(
-        displayID: CGDirectDisplayID, pixelSize: (width: Int, height: Int)? = nil, description: String
-    ) async {
+        displayID: CGDirectDisplayID, pixelSize: (width: Int, height: Int)
+    ) async -> (ScreenCapture, String?) {
         do {
-            try await capture.start(
-                displayID: displayID, pixelSize: pixelSize ?? Displays.pixelSize(of: displayID), fps: captureFps,
-                excludedWindowID: window.windowID)
-            setSource(description: description, displayID: displayID)
+            let capture = try ScreenCapture(device: device)
+            do {
+                try await capture.start(
+                    displayID: displayID, pixelSize: pixelSize, fps: captureFps, excludedWindowID: window.windowID)
+                return (capture, nil)
+            } catch {
+                let permission = CGPreflightScreenCaptureAccess() ? "" : " - ALLOW SCREEN RECORDING AND RELAUNCH"
+                eprint("Screen capture failed: \(error)")
+                return (capture, "CAPTURE FAILED: \(error.localizedDescription.uppercased())\(permission)")
+            }
         } catch {
-            let permission = CGPreflightScreenCaptureAccess() ? "" : " - ALLOW SCREEN RECORDING AND RELAUNCH"
-            setSource(
-                description: "CAPTURE FAILED: \(error.localizedDescription.uppercased())\(permission)", displayID: nil)
-            eprint("Screen capture failed: \(error)")
+            fatalError("Could not create a Metal texture cache: \(error)")
         }
     }
 

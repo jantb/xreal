@@ -103,14 +103,15 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     }
 
     /// Waits until ScreenCaptureKit lists `displayID`, which takes a moment
-    /// for a display that was just created, and returns its size in points.
-    static func shareableSize(of displayID: CGDirectDisplayID, timeout: Double) async -> (width: Int, height: Int)? {
+    /// for a display that was just created, and returns where it is in the
+    /// arrangement, in global points with a top-left origin.
+    static func shareableFrame(of displayID: CGDirectDisplayID, timeout: Double) async -> CGRect? {
         let deadline = monotonicNow() + timeout
         while monotonicNow() < deadline {
             if let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false),
                 let display = content.displays.first(where: { $0.displayID == displayID })
             {
-                return (display.width, display.height)
+                return display.frame
             }
             try? await Task.sleep(for: .milliseconds(500))
         }

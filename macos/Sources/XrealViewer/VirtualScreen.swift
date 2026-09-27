@@ -12,22 +12,23 @@ import XrealCore
 
     var displayID: CGDirectDisplayID { display.displayID }
 
-    /// Returns nil if the WindowServer refuses to create the display.
-    init?(width: Int, height: Int) {
+    /// `index` tells several screens apart. Returns nil if the WindowServer
+    /// refuses to create the display.
+    init?(index: Int, width: Int, height: Int) {
         let descriptor = CGVirtualDisplayDescriptor()
         descriptor.queue = DispatchQueue(label: "xreal.virtual-screen")
-        descriptor.name = "XREAL Virtual Screen"
+        descriptor.name = "XREAL Virtual Screen \(index + 1)"
         descriptor.maxPixelsWide = UInt32(width)
         descriptor.maxPixelsHigh = UInt32(height)
         // A desktop monitor's pixel density, so macOS keeps 1x UI scaling.
         let millimetersPerPixel = 25.4 / 110
         descriptor.sizeInMillimeters = CGSize(
             width: Double(width) * millimetersPerPixel, height: Double(height) * millimetersPerPixel)
-        // macOS remembers arrangement per vendor/product/serial, so keep the
-        // identity stable for a given size.
+        // macOS remembers settings per vendor/product/serial, so keep the
+        // identity stable for a given position in the list and size.
         descriptor.vendorID = 0x5852  // "XR"
         descriptor.productID = 0x5653  // "VS"
-        descriptor.serialNum = UInt32(width) << 16 | UInt32(height)
+        descriptor.serialNum = UInt32(index & 0x3f) << 26 | UInt32(width & 0x1fff) << 13 | UInt32(height & 0x1fff)
         descriptor.terminationHandler = { _, _ in eprint("macOS removed the virtual screen") }
 
         guard let display = CGVirtualDisplay(descriptor: descriptor) else { return nil }

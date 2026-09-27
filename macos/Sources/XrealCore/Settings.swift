@@ -36,10 +36,12 @@ public struct Settings: Equatable, Sendable {
     public var overlayVisible = true
     public var gyroBias: SIMD3<Float> = .zero
     public var source = CaptureSource.mirror
-    // macOS 27 refuses virtual displays exactly 3840 pixels wide (3838 and
-    // 3900 both work), so the default stays just below 4K.
-    public var virtualWidth = 3832
-    public var virtualHeight = 2160
+    /// A wide screen above the main display and one on each side. macOS 27
+    /// refuses some standard sizes, such as 3840 × 2160; these work.
+    public var screens = [
+        RoomScreen(width: 5120, height: 1440), RoomScreen(width: 2880, height: 1620),
+        RoomScreen(width: 2880, height: 1620),
+    ]
     public var projection = Projection.crop
     /// Room projections tilt with the head so the screen stays level.
     public var followRoll = true
@@ -71,6 +73,10 @@ public struct Settings: Equatable, Sendable {
     /// Unknown keys and malformed values fall back to the defaults.
     public static func parse(_ text: String) -> Settings {
         var settings = Settings()
+        var screens: [RoomScreen] = []
+        // Written before several screens were supported.
+        var legacyWidth: Int?
+        var legacyHeight: Int?
         for line in text.split(whereSeparator: \.isNewline) {
             guard let separator = line.firstIndex(of: "=") else { continue }
             let key = line[..<separator].trimmingCharacters(in: .whitespaces)
@@ -85,8 +91,9 @@ public struct Settings: Equatable, Sendable {
             case "gyro_bias_y": parse(value, into: &settings.gyroBias.y)
             case "gyro_bias_z": parse(value, into: &settings.gyroBias.z)
             case "source": settings.source = CaptureSource(rawValue: value) ?? settings.source
-            case "virtual_width": parse(value, into: &settings.virtualWidth, as: UInt.self)
-            case "virtual_height": parse(value, into: &settings.virtualHeight, as: UInt.self)
+            case "screen": parseScreen(value).map { screens.append($0) }
+            case "virtual_width": legacyWidth = UInt(value).flatMap { Int(exactly: $0) }
+            case "virtual_height": legacyHeight = UInt(value).flatMap { Int(exactly: $0) }
             case "projection": settings.projection = Projection(rawValue: value) ?? settings.projection
             case "follow_roll": parse(value, into: &settings.followRoll)
             case "edge": settings.edge = EdgeMode(rawValue: value) ?? settings.edge
@@ -94,28 +101,59 @@ public struct Settings: Equatable, Sendable {
             default: break
             }
         }
+        if !screens.isEmpty {
+            settings.screens = screens
+        } else if let legacyWidth, let legacyHeight, legacyWidth > 0, legacyHeight > 0 {
+            settings.screens = [RoomScreen(width: legacyWidth, height: legacyHeight)]
+        }
         return settings
     }
 
     public func serialize() -> String {
-        """
-        zoom_index=\(zoomIndex)
-        sensitivity=\(sensitivity)
-        deadzone_index=\(deadzoneIndex)
-        prediction=\(prediction)
-        overlay_visible=\(overlayVisible)
-        gyro_bias_x=\(gyroBias.x)
-        gyro_bias_y=\(gyroBias.y)
-        gyro_bias_z=\(gyroBias.z)
-        source=\(source.rawValue)
-        virtual_width=\(virtualWidth)
-        virtual_height=\(virtualHeight)
-        projection=\(projection.rawValue)
-        follow_roll=\(followRoll)
-        edge=\(edge.rawValue)
-        follow_cursor=\(followCursor)
+        let lines =
+            [
+                "zoom_index=\(zoomIndex)",
+                "sensitivity=\(sensitivity)",
+                "deadzone_index=\(deadzoneIndex)",
+                "prediction=\(prediction)",
+                "overlay_visible=\(overlayVisible)",
+                "gyro_bias_x=\(gyroBias.x)",
+                "gyro_bias_y=\(gyroBias.y)",
+                "gyro_bias_z=\(gyroBias.z)",
+                "source=\(source.rawValue)",
+            ] + screens.map { "screen=\(Self.serialize($0))" }
+            + [
+                "projection=\(projection.rawValue)",
+                "follow_roll=\(followRoll)",
+                "edge=\(edge.rawValue)",
+                "follow_cursor=\(followCursor)",
+            ]
+        return lines.map { $0 + "\n" }.joined()
+    }
 
-        """
+    /// `WIDTHxHEIGHT`, then `@x,y,z,distance` once the screen is placed.
+    private static func serialize(_ screen: RoomScreen) -> String {
+        let size = "\(screen.width)x\(screen.height)"
+        guard let placement = screen.placement else { return size }
+        let d = placement.direction
+        return size + "@\(d.x),\(d.y),\(d.z),\(placement.distance)"
+    }
+
+    private static func parseScreen(_ value: String) -> RoomScreen? {
+        let parts = value.split(separator: "@", maxSplits: 1)
+        let size = parts[0].split(separator: "x")
+        guard size.count == 2, let width = UInt(size[0]).flatMap({ Int(exactly: $0) }),
+            let height = UInt(size[1]).flatMap({ Int(exactly: $0) }), width > 0, height > 0
+        else { return nil }
+        var screen = RoomScreen(width: width, height: height)
+        if parts.count == 2 {
+            let numbers = parts[1].split(separator: ",").compactMap { Float($0) }
+            if numbers.count == 4 {
+                screen.placement = ScreenPlacement(
+                    direction: SIMD3(numbers[0], numbers[1], numbers[2]), distance: numbers[3])
+            }
+        }
+        return screen
     }
 
     private static func parse<T: LosslessStringConvertible>(_ value: String, into target: inout T) {
