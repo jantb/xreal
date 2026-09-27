@@ -62,41 +62,52 @@ private final class ActionItem: NSMenuItem {
 
     private func rebuild(_ menu: NSMenu) {
         menu.removeAllItems()
-        let (settings, viewport) = viewer.current
+        let (settings, viewport, screenList, glassesOnly) = viewer.current
 
+        if glassesOnly {
+            menu.addItem(hint("Glasses Only: Lid Closed"))
+        }
         let recenter = ActionItem("Recenter", key: "c") { [viewer] in viewer.perform(.recenter) }
         recenter.keyEquivalentModifierMask = [.control, .option, .command]
         menu.addItem(recenter)
         menu.addItem(ActionItem("Freeze View", checked: viewport.frozen) { [viewer] in viewer.perform(.toggleFreeze) })
         menu.addItem(.separator())
 
-        menu.addItem(
-            submenu(
-                "Source",
-                SourceChoice.all.map { choice in
-                    ActionItem(choice.title, checked: choice.isSelected(in: settings)) { [viewer] in
-                        viewer.perform(.setSource(choice))
-                    }
-                }))
-        let virtual = settings.source == .virtual
+        let source = submenu(
+            "Source",
+            SourceChoice.all.map { choice in
+                ActionItem(choice.title, checked: choice.isSelected(in: settings)) { [viewer] in
+                    viewer.perform(.setSource(choice))
+                }
+            })
+        // With the glasses alone there is no display to mirror.
+        source.isEnabled = !glassesOnly
+        menu.addItem(source)
+        let virtual = glassesOnly || settings.source == .virtual
         let screens = submenu(
             "Virtual Screens",
-            settings.screens.enumerated().map { index, screen in
-                let item = NSMenuItem(
-                    title: "Screen \(index + 1): \(screen.width) × \(screen.height)", action: nil, keyEquivalent: "")
-                item.isEnabled = false
-                return item
+            screenList.enumerated().map { index, screen in
+                ActionItem(
+                    "Screen \(index + 1): \(screen.width) × \(screen.height), Curved", checked: screen.curved
+                ) { [viewer] in viewer.perform(.toggleCurved(index)) }
             } + [
                 .separator(),
                 submenu(
                     "Add Screen",
                     virtualScreenSizes.map { size in
                         ActionItem("\(size.width) × \(size.height)") { [viewer] in
-                            viewer.perform(.addScreen(width: size.width, height: size.height))
+                            viewer.perform(.addScreen(width: size.width, height: size.height, curved: false))
                         }
-                    }),
-                removeScreens(settings.screens),
-                ActionItem("Standard Layout: Wide Above, One Each Side") { [viewer] in
+                    } + [.separator()]
+                        + canvasSizes.map { size in
+                            ActionItem("Curved Canvas \(size.width) × \(size.height)") { [viewer] in
+                                viewer.perform(.addScreen(width: size.width, height: size.height, curved: true))
+                            }
+                        }),
+                removeScreens(screenList),
+                ActionItem(
+                    glassesOnly ? "Standard Layout: First Ahead, Others Beside" : "Standard Layout: Wide Above, One Each Side"
+                ) { [viewer] in
                     viewer.perform(.standardLayout)
                 },
                 .separator(),
@@ -105,6 +116,19 @@ private final class ActionItem: NSMenuItem {
             ])
         screens.isEnabled = virtual
         menu.addItem(screens)
+        let windows = submenu(
+            "Windows",
+            [
+                shortcut("Move Window to Where You Look", "w") { [viewer] in viewer.perform(.moveWindowToGaze) },
+                shortcut("Fit Window to Zone You Look At", "f") { [viewer] in viewer.perform(.fitWindowToZone) },
+                shortcut("Move Pointer to Where You Look", "m") { [viewer] in viewer.perform(.movePointerToGaze) },
+                ActionItem("Bring Back Windows Hidden Behind the Glasses") { [viewer] in
+                    viewer.perform(.gatherWindows)
+                },
+            ] + (WindowControl.allowed(prompt: false)
+                ? [] : [.separator(), hint("Moving windows needs Accessibility access")]))
+        windows.isEnabled = virtual
+        menu.addItem(windows)
         let projections: [(Projection, String)] = [
             (.crop, "Pixel Exact"), (.flat, "Flat Screen in Room"), (.curved, "Curved Screen in Room"),
         ]
@@ -199,6 +223,13 @@ private final class ActionItem: NSMenuItem {
             })
         // At least one screen stays.
         item.isEnabled = screens.count > 1
+        return item
+    }
+
+    /// An item showing its global shortcut, ⌃⌥⌘ and `key`.
+    private func shortcut(_ title: String, _ key: String, handler: @escaping () -> Void) -> NSMenuItem {
+        let item = ActionItem(title, key: key, handler: handler)
+        item.keyEquivalentModifierMask = [.control, .option, .command]
         return item
     }
 

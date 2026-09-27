@@ -86,7 +86,7 @@ private func turned(yaw: Float) -> simd_float3x3 {
             screens: [RoomScreen(width: 1920, height: 1080, placement: placement)], outputWidth: 1920,
             outputHeight: 1080, highlighted: nil)
         let panel = room.panels[0]
-        let edge = room.outputPoint(ofRoom: panel.center + panel.right)!
+        let edge = room.outputPoint(ofRoom: panel.surface.center + panel.surface.right)!
         return edge.x
     }
     // At distance 1 the screen's 1920 pixels fill the view's 1920 pixels.
@@ -122,4 +122,127 @@ private func turned(yaw: Float) -> simd_float3x3 {
     let placements = frames.map { ScreenPlacement(arrangedAt: $0, around: laptop) }
     #expect(placements[0].direction.y > 0.3)
     #expect(placements[1].direction.x > 0.3 && placements[2].direction.x < -0.3)
+}
+
+private let canvas = RoomScreen(
+    width: 7672, height: 2160, placement: ScreenPlacement(direction: SIMD3(0, 0, -1)), curved: true)
+
+private func azimuth(_ point: SIMD3<Float>) -> Float { atan2(point.x, -point.z) }
+
+@Test func curvedCanvasWrapsAroundTheViewerAtAnEvenDistance() throws {
+    let surface = try #require(canvas.surface)
+    let left = surface.point(at: SIMD2(-1, 0))
+    let right = surface.point(at: SIMD2(1, 0))
+    // An 8K-wide canvas at the glasses' pixel density wraps most of the way round.
+    #expect(azimuth(right) > 1.3 && azimuth(left) < -1.3)
+    for x in stride(from: Float(-1), through: 1, by: 0.25) {
+        let point = surface.point(at: SIMD2(x, 0))
+        #expect(abs(simd_length(point) - 1) < 1e-4)
+    }
+}
+
+@Test func curvedScreenBroughtVeryCloseStopsWrappingFurther() throws {
+    var close = canvas
+    close.placement = ScreenPlacement(direction: SIMD3(0, 0, -1), distance: 0.3)
+    let surface = try #require(close.surface)
+    let edge = surface.point(at: SIMD2(1, 0))
+    // Never wraps so far that the edges meet behind the viewer.
+    #expect(azimuth(edge) > 0 && azimuth(edge) < .pi)
+}
+
+@Test func lookingFarToTheSideStillFindsTheCurvedCanvas() throws {
+    let screens = [canvas]
+    let sideways = SIMD3<Float>(sin(1.2), 0, -cos(1.2))
+    let target = try #require(gazeTarget(sideways, among: screens))
+    #expect(target.index == 0)
+    #expect(target.pixel.x > 7672 * 0.8)
+    #expect(abs(target.pixel.y - 1080) < 20)
+    #expect(gazeTarget(SIMD3(0, 0, 1), among: screens) == nil)
+}
+
+@Test func lookingStraightAtAScreenTargetsItsMiddle() throws {
+    let screen = RoomScreen(width: 1920, height: 1080, placement: ScreenPlacement(direction: SIMD3(0, 0, -1)))
+    let target = try #require(gazeTarget(SIMD3(0, 0, -1), among: [screen]))
+    #expect(simd_distance(target.pixel, SIMD2(960, 540)) < 1)
+}
+
+@Test func screensSideBySideInTheArrangementSitSideBySideInTheRoom() throws {
+    let ahead = CGRect.zero
+    let frames = glassesOnlyArrangement(for: [canvas, RoomScreen(width: 2880, height: 1620)], ahead: ahead.origin)
+    var side = RoomScreen(width: 2880, height: 1620)
+    side.placement = ScreenPlacement(arrangedAt: frames[1], around: ahead)
+    let canvasEdge = azimuth(try #require(canvas.surface).point(at: SIMD2(1, 0)))
+    let sideEdge = azimuth(try #require(side.surface).point(at: SIMD2(-1, 0)))
+    #expect(abs(sideEdge - canvasEdge) < 0.1, "gap or overlap of \(sideEdge - canvasEdge) rad")
+}
+
+@Test func glassesOnlyLayoutPutsTheFirstScreenAheadAndTheRestBeside() {
+    let screens = [canvas, RoomScreen(width: 2880, height: 1620), RoomScreen(width: 1920, height: 1080)]
+    let frames = glassesOnlyArrangement(for: screens)
+    #expect(abs(frames[0].midX) <= 1 && abs(frames[0].midY) <= 1)
+    #expect(frames[1].minX >= frames[0].maxX)
+    #expect(frames[2].maxX <= frames[0].minX)
+    for (index, frame) in frames.enumerated() {
+        for other in frames[(index + 1)...] {
+            #expect(!frame.intersects(other))
+        }
+    }
+}
+
+@Test func referenceFromAScreenArrangesItWhereAsked() {
+    for screen in [
+        canvas,
+        RoomScreen(width: 2880, height: 1620, placement: ScreenPlacement(direction: SIMD3(0.5, 0.2, -1))),
+    ] {
+        let reference = aheadReference(for: screen, arrangedAt: .zero)
+        let origin = screen.placement!.arrangedOrigin(width: screen.width, height: screen.height, around: reference)
+        #expect(abs(origin.x) <= 1 && abs(origin.y) <= 1)
+    }
+}
+
+@Test func wideScreensAreCapturedInTilesCoveringEveryColumn() {
+    for width in [1920, 3832, 5752, 7672, 8192] {
+        let tiles = captureTiles(width: width)
+        #expect(tiles.first?.lowerBound == 0 && tiles.last?.upperBound == width)
+        for (tile, next) in zip(tiles, tiles.dropFirst()) {
+            #expect(tile.upperBound == next.lowerBound)
+        }
+    }
+    #expect(captureTiles(width: 7672).count > 1)
+}
+
+@Test func onlyPanelsNearTheViewCountAsShown() {
+    var viewport = ViewportController(settings: Settings())
+    viewport.recenter(HeadPose())
+    let screens = [
+        RoomScreen(width: 1920, height: 1080, placement: ScreenPlacement(direction: SIMD3(0, 0, -1))),
+        RoomScreen(width: 1920, height: 1080, placement: ScreenPlacement(direction: SIMD3(0, 0, 1))),
+    ]
+    let room = viewport.roomView(screens: screens, outputWidth: 1920, outputHeight: 1080, highlighted: nil)
+    let ahead = room.panels.first { $0.screen == 0 }!
+    let behind = room.panels.first { $0.screen == 1 }!
+    #expect(room.shows(ahead, margin: 0.5))
+    #expect(!room.shows(behind, margin: 0.5))
+}
+
+@Test func zoneIsAboutOneViewOfACanvasAroundThePoint() {
+    let point = SIMD2<Float>(5000, 900)
+    let found = zone(around: point, width: 7672, height: 2160)
+    #expect(found.contains(CGPoint(x: 5000, y: 900)))
+    #expect(found.width > 1500 && found.width < 2600)
+    #expect(found.minX >= 0 && found.maxX <= 7672 && found.minY >= 0 && found.maxY <= 2160)
+
+    let small = zone(around: SIMD2(100, 100), width: 1920, height: 1080)
+    #expect(small == CGRect(x: 0, y: 0, width: 1920, height: 1080))
+}
+
+@Test func windowMovedToAPointStaysOnTheScreen() {
+    let screen = CGRect(x: 1000, y: -500, width: 2880, height: 1620)
+    let size = CGSize(width: 800, height: 600)
+    let middle = windowOrigin(size: size, centeredOn: CGPoint(x: 2000, y: 200), within: screen)
+    #expect(middle == CGPoint(x: 1600, y: -100))
+
+    let corner = windowOrigin(size: size, centeredOn: CGPoint(x: 3870, y: 1110), within: screen)
+    #expect(CGRect(origin: corner, size: size).maxX <= screen.maxX)
+    #expect(CGRect(origin: corner, size: size).maxY <= screen.maxY)
 }

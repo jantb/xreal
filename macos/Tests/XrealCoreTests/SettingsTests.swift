@@ -72,3 +72,23 @@ import simd
     #expect(settings.prediction == false)
     #expect(settings.gyroBias == SIMD3(0.0012, -0.0034, 0.00056))
 }
+
+@Test func curvedAndGlassesOnlyScreensLoadBack() {
+    var settings = Settings()
+    settings.screens = [RoomScreen(width: 2880, height: 1620, curved: true)]
+    settings.glassesOnlyScreens = [
+        RoomScreen(width: 7672, height: 2160, placement: ScreenPlacement(direction: SIMD3(0, 0, -1)), curved: true),
+        RoomScreen(width: 1920, height: 1080),
+    ]
+    let loaded = Settings.parse(settings.serialize())
+    #expect(loaded.screens == settings.screens)
+    #expect(loaded.glassesOnlyScreens.map(\.curved) == [true, false])
+    #expect(loaded.glassesOnlyScreens.map(\.width) == [7672, 1920])
+    #expect(loaded.glassesOnlyScreens[0].placement != nil)
+}
+
+@Test func screensTooLargeForMacOSAreSkipped() {
+    let settings = Settings.parse("screen=16384x2160\nscreen=7672x2160,curved\nglasses_only_screen=99999x100\n")
+    #expect(settings.screens == [RoomScreen(width: 7672, height: 2160, curved: true)])
+    #expect(settings.glassesOnlyScreens == Settings().glassesOnlyScreens)
+}

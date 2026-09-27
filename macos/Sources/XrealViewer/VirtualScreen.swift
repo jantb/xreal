@@ -15,6 +15,10 @@ import XrealCore
     /// `index` tells several screens apart. Returns nil if the WindowServer
     /// refuses to create the display.
     init?(index: Int, width: Int, height: Int) {
+        // Much larger displays crash the WindowServer, logging the user out.
+        guard (1...maxVirtualScreenSide).contains(width), (1...maxVirtualScreenSide).contains(height) else {
+            return nil
+        }
         let descriptor = CGVirtualDisplayDescriptor()
         descriptor.queue = DispatchQueue(label: "xreal.virtual-screen")
         descriptor.name = "XREAL Virtual Screen \(index + 1)"
@@ -26,7 +30,7 @@ import XrealCore
             width: Double(width) * millimetersPerPixel, height: Double(height) * millimetersPerPixel)
         // macOS remembers settings per vendor/product/serial, so keep the
         // identity stable for a given position in the list and size.
-        descriptor.vendorID = 0x5852  // "XR"
+        descriptor.vendorID = Displays.virtualScreenVendor
         descriptor.productID = 0x5653  // "VS"
         descriptor.serialNum = UInt32(index & 0x3f) << 26 | UInt32(width & 0x1fff) << 13 | UInt32(height & 0x1fff)
         descriptor.terminationHandler = { _, _ in eprint("macOS removed the virtual screen") }

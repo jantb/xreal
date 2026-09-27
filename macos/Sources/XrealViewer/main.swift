@@ -63,6 +63,37 @@ func probe() {
     }
 }
 
+/// `--probe-sizes [WxH ...]`: creates a virtual screen of each size in turn
+/// and prints the size macOS actually gives it. macOS refuses or shrinks
+/// some sizes, and which ones changes between releases.
+@MainActor func probeSizes(_ arguments: [String]) {
+    let asked = arguments.compactMap { argument -> (Int, Int)? in
+        let parts = argument.split(separator: "x").compactMap { Int($0) }
+        return parts.count == 2 ? (parts[0], parts[1]) : nil
+    }
+    let sizes = asked.isEmpty ? virtualScreenSizes.map { ($0.width, $0.height) } : asked
+    for (width, height) in sizes {
+        guard let screen = VirtualScreen(index: 63, width: width, height: height) else {
+            print("\(width)x\(height): refused")
+            continue
+        }
+        var got = (0, 0)
+        let deadline = monotonicNow() + 5
+        while monotonicNow() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+            got = Displays.pixelSize(of: screen.displayID)
+            if got.0 > 0 { break }
+        }
+        print("\(width)x\(height): \(got == (width, height) ? "ok" : "came up as \(got.0)x\(got.1)")")
+        withExtendedLifetime(screen) {}
+    }
+}
+
+if let index = CommandLine.arguments.firstIndex(of: "--probe-sizes") {
+    probeSizes(Array(CommandLine.arguments[(index + 1)...]))
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--probe") {
     probe()
     exit(0)

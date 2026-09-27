@@ -58,6 +58,8 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     private let queue = DispatchQueue(label: "xreal.capture", qos: .userInteractive)
     private let textureCache: CVMetalTextureCache
     @MainActor private var stream: SCStream?
+    @MainActor private var configuration: SCStreamConfiguration?
+    @MainActor private(set) var fps = 0
 
     init(device: MTLDevice) throws {
         var cache: CVMetalTextureCache?
@@ -69,8 +71,10 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     /// Captures `displayID` at `pixelSize`, leaving out the window with
     /// `excludedWindowID` so the viewer never captures itself. The app's
     /// other windows, such as its menu bar menu, stay in the picture.
+    /// `sourceRect`, in the display's points, captures only that part of it.
     @MainActor func start(
-        displayID: CGDirectDisplayID, pixelSize: (width: Int, height: Int), fps: Int, excludedWindowID: CGWindowID
+        displayID: CGDirectDisplayID, pixelSize: (width: Int, height: Int), sourceRect: CGRect? = nil, fps: Int,
+        excludedWindowID: CGWindowID
     ) async throws {
         await stop()
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
@@ -88,16 +92,34 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         configuration.colorSpaceName = CGColorSpace.sRGB
         configuration.queueDepth = 4
         configuration.showsCursor = true
+        if let sourceRect {
+            configuration.sourceRect = sourceRect
+        }
 
         let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await newStream.startCapture()
         stream = newStream
+        self.configuration = configuration
+        self.fps = fps
+    }
+
+    /// Changes how often frames are captured, while capturing.
+    @MainActor func setFps(_ fps: Int) async {
+        guard let stream, let configuration, fps != self.fps else { return }
+        self.fps = fps
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        do {
+            try await stream.updateConfiguration(configuration)
+        } catch {
+            eprint("Could not change the capture rate: \(error.localizedDescription)")
+        }
     }
 
     @MainActor func stop() async {
         guard let current = stream else { return }
         stream = nil
+        configuration = nil
         try? await current.stopCapture()
         latest.publish(nil)
     }

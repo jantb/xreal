@@ -108,8 +108,9 @@ public func hudLines(_ info: HudInfo) -> [String] {
             (spatial.curved ? "VIEW CURVED" : "VIEW FLAT")
             + (middle.map { String(format: " LOOKING AT %.0f,%.0f", $0.x, $0.y) } ?? " LOOKING AWAY")
     case .room(let room):
-        let looked = room.panels.first(where: \.highlighted).map { " LOOKING AT SCREEN \($0.source + 1)" } ?? ""
-        view = "VIEW ROOM \(room.panels.count) SCREENS" + looked
+        let looked = room.panels.first(where: \.highlighted).map { " LOOKING AT SCREEN \($0.screen + 1)" } ?? ""
+        let screens = Set(room.panels.map(\.screen)).count
+        view = "VIEW ROOM \(screens) SCREENS" + looked
     }
     let bias = tracking.gyroBias
 

@@ -72,25 +72,40 @@ private let shaderSource = """
         return sampleOrBlack(source, linear, pixel / u.sourcePan.xy);
     }
 
-    // One virtual screen hanging in the room, drawn as a quad.
+    // One capture of a virtual screen hanging in the room: the part of the
+    // screen from span.x to span.y (-1 to 1 across), flat or curved.
     struct Panel {
         float4x4 viewProjection;
         float4 center, right, up;  // room coordinates; half extents
+        float4 shape;              // x: half arc (0 flat), yz: span, w: segments
         float4 outline;            // x: 1 to outline the screen
     };
 
     struct PanelOut {
         float4 position [[position]];
-        float2 uv;
+        float2 uv;        // in the capture
+        float2 screenUV;  // in the whole screen, for the outline
     };
 
+    // Mirrors `ScreenSurface.point(at:)`.
     vertex PanelOut panelVertex(uint id [[vertex_id]], constant Panel &panel [[buffer(0)]]) {
-        // Triangle strip: top left, bottom left, top right, bottom right.
-        float2 corner = float2((id & 2) ? 1 : -1, (id & 1) ? -1 : 1);
-        float3 room = panel.center.xyz + corner.x * panel.right.xyz + corner.y * panel.up.xyz;
+        // Triangle strip down the columns: top, bottom, next top, ...
+        float t = float(id >> 1) / panel.shape.w;
+        float x = mix(panel.shape.y, panel.shape.z, t);
+        float y = (id & 1) ? -1 : 1;
+        float3 room;
+        if (panel.shape.x > 0) {
+            float angle = x * panel.shape.x;
+            float radius = length(panel.center.xyz);
+            room = cos(angle) * panel.center.xyz + sin(angle) * radius * normalize(panel.right.xyz)
+                + y * panel.up.xyz;
+        } else {
+            room = panel.center.xyz + x * panel.right.xyz + y * panel.up.xyz;
+        }
         PanelOut out;
         out.position = panel.viewProjection * float4(room, 1);
-        out.uv = float2(corner.x * 0.5 + 0.5, 0.5 - corner.y * 0.5);
+        out.uv = float2(t, 0.5 - y * 0.5);
+        out.screenUV = float2(x * 0.5 + 0.5, 0.5 - y * 0.5);
         return out;
     }
 
@@ -98,14 +113,29 @@ private let shaderSource = """
                                   constant Panel &panel [[buffer(0)]],
                                   texture2d<float> source [[texture(0)]],
                                   sampler linear [[sampler(0)]]) {
+        // Derivatives first, while every pixel of the quad still runs.
+        float2 edgeWidth = fwidth(in.screenUV);
+        float2 dx = dfdx(in.uv);
+        float2 dy = dfdy(in.uv);
         if (panel.outline.x > 0.5) {
             // About three glasses pixels wide, however far away the screen is.
-            float2 fromEdge = min(in.uv, 1 - in.uv) / fwidth(in.uv);
+            float2 fromEdge = min(in.screenUV, 1 - in.screenUV) / edgeWidth;
             if (min(fromEdge.x, fromEdge.y) < 3) {
                 return float4(0.35, 0.75, 1, 1);
             }
         }
-        return float4(source.sample(linear, in.uv).rgb, 1);
+        // A screen pushed away covers several source pixels per glasses
+        // pixel; averaging four samples across that keeps text from
+        // shimmering.
+        float2 size = float2(source.get_width(), source.get_height());
+        if (max(length(dx * size), length(dy * size)) < 1.25) {
+            return float4(source.sample(linear, in.uv).rgb, 1);
+        }
+        float3 sum = source.sample(linear, in.uv + 0.25 * (dx + dy)).rgb
+            + source.sample(linear, in.uv + 0.25 * (dx - dy)).rgb
+            + source.sample(linear, in.uv - 0.25 * (dx + dy)).rgb
+            + source.sample(linear, in.uv - 0.25 * (dx - dy)).rgb;
+        return float4(sum * 0.25, 1);
     }
     """
 
@@ -113,6 +143,8 @@ private let shaderSource = """
 // screen shows at the glasses' pixel density).
 private let nearClip: Float = 0.05
 private let farClip: Float = 100
+// A curved screen is drawn as flat strips about this wide.
+private let curveSegmentAngle: Float = 0.02  // rad, about 1°
 
 enum RendererError: Error {
     case noMetalDevice
@@ -231,13 +263,18 @@ final class Renderer: @unchecked Sendable {
             let viewProjection = Self.viewProjection(room)
             for panel in room.panels {
                 guard panel.source < frames.count, let frame = frames[panel.source] else { continue }
+                let surface = panel.surface
+                let arc = surface.halfArc * (panel.span.y - panel.span.x)
+                let segments = surface.halfArc > 0 ? max(Int((arc / curveSegmentAngle).rounded(.up)), 1) : 1
                 var uniforms = PanelUniforms(
-                    viewProjection: viewProjection, center: SIMD4(panel.center, 1), right: SIMD4(panel.right, 0),
-                    up: SIMD4(panel.up, 0), outline: SIMD4(panel.highlighted ? 1 : 0, 0, 0, 0))
+                    viewProjection: viewProjection, center: SIMD4(surface.center, 1), right: SIMD4(surface.right, 0),
+                    up: SIMD4(surface.up, 0),
+                    shape: SIMD4(surface.halfArc, panel.span.x, panel.span.y, Float(segments)),
+                    outline: SIMD4(panel.highlighted ? 1 : 0, 0, 0, 0))
                 encoder.setVertexBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
                 encoder.setFragmentBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
                 encoder.setFragmentTexture(frame.texture, index: 0)
-                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 2 * (segments + 1))
             }
         }
         encoder.endEncoding()
@@ -252,6 +289,7 @@ final class Renderer: @unchecked Sendable {
         var center: SIMD4<Float>
         var right: SIMD4<Float>
         var up: SIMD4<Float>
+        var shape: SIMD4<Float>
         var outline: SIMD4<Float>
     }
 

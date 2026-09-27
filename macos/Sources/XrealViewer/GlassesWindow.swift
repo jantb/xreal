@@ -10,18 +10,43 @@ enum Displays {
         CGDisplayVendorNumber(id) == glassesVendor
     }
 
+    /// Vendor number of the virtual screens this app creates.
+    static let virtualScreenVendor: UInt32 = 0x5852  // "XR"
+
     static func glassesScreen() -> NSScreen? {
         NSScreen.screens.first { $0.displayID.map(isGlasses) ?? false }
     }
 
-    /// The main display, unless that is the glasses.
+    static func glassesDisplay() -> CGDirectDisplayID? {
+        active().first(where: isGlasses)
+    }
+
+    /// A display the viewer can see in the room, such as the laptop's own
+    /// screen: neither the glasses nor one of this app's virtual screens.
+    static func isReal(_ id: CGDirectDisplayID) -> Bool {
+        !isGlasses(id) && CGDisplayVendorNumber(id) != virtualScreenVendor
+    }
+
+    /// Whether the glasses are connected and are the only real display,
+    /// as with the laptop lid closed. `virtualScreens` are this app's own.
+    static func glassesOnly(besides virtualScreens: Set<CGDirectDisplayID>) -> Bool {
+        let displays = active().filter { !virtualScreens.contains($0) }
+        return displays.contains(where: isGlasses) && !displays.contains(where: isReal)
+    }
+
+    /// The main display, or another real display when the main one is the
+    /// glasses or a virtual screen.
     static func mirrorSource() -> CGDirectDisplayID {
         let main = CGMainDisplayID()
-        if !isGlasses(main) { return main }
+        if isReal(main) { return main }
+        return active().first(where: isReal) ?? active().first { !isGlasses($0) } ?? main
+    }
+
+    static func active() -> [CGDirectDisplayID] {
         var count: UInt32 = 0
-        var ids = [CGDirectDisplayID](repeating: 0, count: 16)
+        var ids = [CGDirectDisplayID](repeating: 0, count: 32)
         CGGetActiveDisplayList(UInt32(ids.count), &ids, &count)
-        return ids.prefix(Int(count)).first { !isGlasses($0) } ?? main
+        return Array(ids.prefix(Int(count)))
     }
 
     static func pixelSize(of id: CGDirectDisplayID) -> (width: Int, height: Int) {

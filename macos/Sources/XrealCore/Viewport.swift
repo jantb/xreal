@@ -319,18 +319,28 @@ public struct ViewportController: Sendable {
         return rotationY(offsetYaw * sensitivity) * rotationX(-offsetPitch * sensitivity) * rotationZ(-roll)
     }
 
-    /// The virtual screens around the viewer, outlining the one at
-    /// `highlighted`. Screens not placed yet are left out.
+    /// The virtual screens around the viewer, outlining screen `highlighted`.
+    /// Each screen is one panel per capture tile, numbered in order across
+    /// the screens. Screens not placed yet are left out.
     public func roomView(
         screens: [RoomScreen], outputWidth: Int, outputHeight: Int, highlighted: Int?
     ) -> RoomView {
         let tanX = tan(horizontalFov * 0.5) / zoom
         let aspect = Float(max(outputHeight, 1)) / Float(max(outputWidth, 1))
-        let panels = screens.enumerated().compactMap { index, screen -> RoomView.Panel? in
-            guard let placement = screen.placement else { return nil }
-            let (center, right, up) = placement.frame(width: screen.width, height: screen.height)
-            return RoomView.Panel(
-                source: index, center: center, right: right, up: up, highlighted: index == highlighted)
+        var panels: [RoomView.Panel] = []
+        var source = 0
+        for (index, screen) in screens.enumerated() {
+            let tiles = captureTiles(width: screen.width)
+            defer { source += tiles.count }
+            guard let surface = screen.surface else { continue }
+            let width = Float(screen.width)
+            for (tile, columns) in tiles.enumerated() {
+                let span = SIMD2(Float(columns.lowerBound), Float(columns.upperBound)) / width * 2 - 1
+                panels.append(
+                    RoomView.Panel(
+                        source: source + tile, screen: index, surface: surface, span: span,
+                        highlighted: index == highlighted))
+            }
         }
         return RoomView(headRotation: headRotation, tanHalfFov: SIMD2(tanX, tanX * aspect), panels: panels)
     }
