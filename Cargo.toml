@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 winit = { version = "0.30.12", features = ["default", "rwh_05"] }
 
-scap = {git = "https://github.com/CapSoftware/scap"}
+scap = { git = "https://github.com/CapSoftware/scap", rev = "b0da3c7a0c373ec179f32c1bf39d894be4eda173" }
 pixels = "0.14.0"
 
 dcmimu = "0.2.2"
@@ -15,6 +15,4 @@ hidapi = { version = "2.6.3" }
 byteorder = "1.5.0"
 tinyjson = { version = "2.5.1" }
 bytemuck = { version = "1.23.2" }
-crossbeam-channel = "0.5.13"
 thread-priority = "3.0.0"
-once_cell = "1.21.3"
