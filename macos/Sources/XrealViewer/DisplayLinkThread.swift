@@ -27,16 +27,29 @@ final class DisplayLinkThread: NSObject, CAMetalDisplayLinkDelegate, @unchecked 
         thread.start()
     }
 
-    /// Starts driving `layer`, replacing any earlier link, so frames come at
-    /// the refresh rate of the screen the layer is on now.
-    func attach(to layer: CAMetalLayer) {
-        perform(#selector(attachOnThread(_:)), on: thread, with: layer, waitUntilDone: false)
+    private final class Attachment: NSObject {
+        let layer: CAMetalLayer
+        let fps: Float
+
+        init(layer: CAMetalLayer, fps: Float) {
+            self.layer = layer
+            self.fps = fps
+        }
     }
 
-    @objc private func attachOnThread(_ layer: CAMetalLayer) {
+    /// Starts driving `layer`, replacing any earlier link, with frames at
+    /// `fps`, the refresh rate of the screen the layer is on now. Asking for
+    /// more than the screen shows makes frames come unevenly.
+    func attach(to layer: CAMetalLayer, fps: Int) {
+        let attachment = Attachment(layer: layer, fps: Float(max(fps, 30)))
+        perform(#selector(attachOnThread(_:)), on: thread, with: attachment, waitUntilDone: false)
+    }
+
+    @objc private func attachOnThread(_ attachment: Attachment) {
         link?.invalidate()
-        let link = CAMetalDisplayLink(metalLayer: layer)
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+        let link = CAMetalDisplayLink(metalLayer: attachment.layer)
+        let fps = attachment.fps
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: fps, maximum: fps, preferred: fps)
         // One frame in flight: the pose sampled for a frame is at most one
         // refresh old when it is shown.
         link.preferredFrameLatency = 1

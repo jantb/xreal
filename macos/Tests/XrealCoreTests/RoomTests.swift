@@ -4,61 +4,19 @@ import simd
 
 @testable import XrealCore
 
-private let laptop = CGRect(x: 0, y: 0, width: 2056, height: 1329)
 private let ahead = matrix_identity_float3x3
 
-private func turned(yaw: Float) -> simd_float3x3 {
-    var viewport = ViewportController(settings: Settings())
-    viewport.setDeadzone(0)
-    viewport.recenter(HeadPose())
-    for _ in 0..<480 {
-        viewport.track(pose: HeadPose(yaw: yaw), dt: 1.0 / 120)
-    }
-    return viewport.headRotation
-}
-
-@Test func screenArrangedRightOfTheLaptopStartsToTheRight() {
-    let right = ScreenPlacement(arrangedAt: CGRect(x: 2056, y: 0, width: 1920, height: 1080), around: laptop)
-    let above = ScreenPlacement(arrangedAt: CGRect(x: 68, y: -1080, width: 1920, height: 1080), around: laptop)
-
-    #expect(right.direction.x > 0.3)
-    #expect(abs(right.direction.y) < 0.2)
-    #expect(above.direction.y > 0.3)
-    #expect(abs(above.direction.x) < 0.05)
-}
-
-@Test func placementFromTheArrangementArrangesBackTheSame() {
-    for frame in [
-        CGRect(x: 2056, y: 0, width: 1920, height: 1080), CGRect(x: 68, y: -1080, width: 1920, height: 1080),
-        CGRect(x: -2880, y: 200, width: 2880, height: 1620),
-    ] {
-        let placement = ScreenPlacement(arrangedAt: frame, around: laptop)
-        let origin = placement.arrangedOrigin(width: Int(frame.width), height: Int(frame.height), around: laptop)
-        #expect(abs(origin.x - frame.minX) <= 1 && abs(origin.y - frame.minY) <= 1, "\(frame) came back at \(origin)")
-    }
-}
-
-@Test func lookingAtAScreenPicksIt() {
-    let screens = [
-        RoomScreen(width: 1920, height: 1080, placement: ScreenPlacement(direction: SIMD3(-1, 0, -1))),
-        RoomScreen(width: 1920, height: 1080, placement: ScreenPlacement(direction: SIMD3(1, 0, -1))),
-    ]
-    #expect(screenLooked(at: normalize(SIMD3(-1, 0, -1)), among: screens) == 0)
-    #expect(screenLooked(at: normalize(SIMD3(1, 0.1, -1)), among: screens) == 1)
-    #expect(screenLooked(at: SIMD3(0, 0, 1), among: screens) == nil)
-}
-
-@Test func nearerScreenWinsWhereScreensOverlap() {
-    let screens = [
-        RoomScreen(width: 1920, height: 1080, placement: ScreenPlacement(direction: SIMD3(0, 0, -1), distance: 2)),
-        RoomScreen(width: 1920, height: 1080, placement: ScreenPlacement(direction: SIMD3(0, 0, -1), distance: 1)),
-    ]
-    #expect(screenLooked(at: SIMD3(0, 0, -1), among: screens) == 1)
+@Test func lookingAtTheCanvasFindsItAndLookingAwayDoesNot() throws {
+    let screen = RoomScreen(width: 1920, height: 1080, placement: ScreenPlacement(direction: SIMD3(-1, 0, -1)))
+    let pixel = try #require(gazeTarget(normalize(SIMD3(-1, 0, -1)), on: screen))
+    #expect(simd_distance(pixel, SIMD2(960, 540)) < 1)
+    #expect(gazeTarget(normalize(SIMD3(1, 0, -1)), on: screen) == nil)
+    #expect(gazeTarget(SIMD3(0, 0, 1), on: screen) == nil)
 }
 
 @Test func grabbedScreenFollowsTheHeadAndStaysWhereItIsLetGo() throws {
     let start = ScreenPlacement(direction: SIMD3(0, 0, -1))
-    let grab = ScreenGrab(index: 0, placement: start, headRotation: ahead)
+    let grab = ScreenGrab(placement: start, headRotation: ahead)
 
     func middleOfScreen(_ placement: ScreenPlacement, seenWith headRotation: simd_float3x3) -> SIMD2<Float>? {
         let view = RoomView(headRotation: headRotation, tanHalfFov: SIMD2(1, 0.5625), panels: [])
@@ -66,7 +24,7 @@ private func turned(yaw: Float) -> simd_float3x3 {
     }
 
     // Carried along a head turn to the left, it stays in the middle of the view...
-    let turnedLeft = turned(yaw: 0.5)
+    let turnedLeft = headRotation(yaw: 0.5, roll: 0)
     let dropped = grab.placement(headRotation: turnedLeft, distance: start.distance)
     let carried = try #require(middleOfScreen(dropped, seenWith: turnedLeft))
     #expect(simd_length(carried) < 1e-3)
@@ -83,8 +41,8 @@ private func turned(yaw: Float) -> simd_float3x3 {
         var viewport = ViewportController(settings: Settings())
         viewport.recenter(HeadPose())
         let room = viewport.roomView(
-            screens: [RoomScreen(width: 1920, height: 1080, placement: placement)], outputWidth: 1920,
-            outputHeight: 1080, highlighted: nil)
+            canvas: RoomScreen(width: 1920, height: 1080, placement: placement), outputWidth: 1920,
+            outputHeight: 1080, highlighted: false)
         let panel = room.panels[0]
         let edge = room.outputPoint(ofRoom: panel.surface.center + panel.surface.right)!
         return edge.x
@@ -102,102 +60,56 @@ private func turned(yaw: Float) -> simd_float3x3 {
     #expect(up.y > 0)
 }
 
-@Test func standardLayoutPutsAWideScreenAboveAndOneOnEachSide() {
-    let screens = [
-        RoomScreen(width: 5120, height: 1440), RoomScreen(width: 2880, height: 1620),
-        RoomScreen(width: 2880, height: 1620), RoomScreen(width: 1920, height: 1080),
-    ]
-    let frames = standardArrangement(for: screens, around: laptop)
-    #expect(frames[0].maxY <= laptop.minY && abs(frames[0].midX - laptop.midX) <= 1)
-    #expect(frames[1].minX >= laptop.maxX)
-    #expect(frames[2].maxX <= laptop.minX)
-    #expect(frames[3].minX >= frames[1].maxX)
-    for (index, frame) in frames.enumerated() {
-        #expect(!frame.intersects(laptop), "screen \(index) overlaps the laptop")
-        for other in frames[(index + 1)...] {
-            #expect(!frame.intersects(other))
-        }
-    }
-
-    let placements = frames.map { ScreenPlacement(arrangedAt: $0, around: laptop) }
-    #expect(placements[0].direction.y > 0.3)
-    #expect(placements[1].direction.x > 0.3 && placements[2].direction.x < -0.3)
-}
-
 private let canvas = RoomScreen(
     width: 7672, height: 2160, placement: ScreenPlacement(direction: SIMD3(0, 0, -1)), curved: true)
 
 private func azimuth(_ point: SIMD3<Float>) -> Float { atan2(point.x, -point.z) }
 
-@Test func curvedCanvasWrapsAroundTheViewerAtAnEvenDistance() throws {
-    let surface = try #require(canvas.surface)
-    let left = surface.point(at: SIMD2(-1, 0))
-    let right = surface.point(at: SIMD2(1, 0))
-    // An 8K-wide canvas at the glasses' pixel density wraps most of the way round.
-    #expect(azimuth(right) > 1.3 && azimuth(left) < -1.3)
-    for x in stride(from: Float(-1), through: 1, by: 0.25) {
-        let point = surface.point(at: SIMD2(x, 0))
-        #expect(abs(simd_length(point) - 1) < 1e-4)
-    }
-}
-
 @Test func curvedScreenBroughtVeryCloseStopsWrappingFurther() throws {
     var close = canvas
     close.placement = ScreenPlacement(direction: SIMD3(0, 0, -1), distance: 0.3)
-    let surface = try #require(close.surface)
-    let edge = surface.point(at: SIMD2(1, 0))
+    let edge = close.surface().point(at: SIMD2(1, 0))
     // Never wraps so far that the edges meet behind the viewer.
     #expect(azimuth(edge) > 0 && azimuth(edge) < .pi)
 }
 
-@Test func lookingFarToTheSideStillFindsTheCurvedCanvas() throws {
-    let screens = [canvas]
-    let sideways = SIMD3<Float>(sin(1.2), 0, -cos(1.2))
-    let target = try #require(gazeTarget(sideways, among: screens))
-    #expect(target.index == 0)
-    #expect(target.pixel.x > 7672 * 0.8)
-    #expect(abs(target.pixel.y - 1080) < 20)
-    #expect(gazeTarget(SIMD3(0, 0, 1), among: screens) == nil)
+private let raisedCurved = RoomScreen(
+    width: 5120, height: 1440, placement: ScreenPlacement(direction: SIMD3(0, sin(0.53), -cos(0.53))),
+    curved: true)
+
+private func elevation(_ point: SIMD3<Float>) -> Float {
+    atan2(point.y, simd_length(SIMD2(point.x, point.z)))
 }
 
-@Test func lookingStraightAtAScreenTargetsItsMiddle() throws {
-    let screen = RoomScreen(width: 1920, height: 1080, placement: ScreenPlacement(direction: SIMD3(0, 0, -1)))
-    let target = try #require(gazeTarget(SIMD3(0, 0, -1), among: [screen]))
-    #expect(simd_distance(target.pixel, SIMD2(960, 540)) < 1)
-}
-
-@Test func screensSideBySideInTheArrangementSitSideBySideInTheRoom() throws {
-    let ahead = CGRect.zero
-    let frames = glassesOnlyArrangement(for: [canvas, RoomScreen(width: 2880, height: 1620)], ahead: ahead.origin)
-    var side = RoomScreen(width: 2880, height: 1620)
-    side.placement = ScreenPlacement(arrangedAt: frames[1], around: ahead)
-    let canvasEdge = azimuth(try #require(canvas.surface).point(at: SIMD2(1, 0)))
-    let sideEdge = azimuth(try #require(side.surface).point(at: SIMD2(-1, 0)))
-    #expect(abs(sideEdge - canvasEdge) < 0.1, "gap or overlap of \(sideEdge - canvasEdge) rad")
-}
-
-@Test func glassesOnlyLayoutPutsTheFirstScreenAheadAndTheRestBeside() {
-    let screens = [canvas, RoomScreen(width: 2880, height: 1620), RoomScreen(width: 1920, height: 1080)]
-    let frames = glassesOnlyArrangement(for: screens)
-    #expect(abs(frames[0].midX) <= 1 && abs(frames[0].midY) <= 1)
-    #expect(frames[1].minX >= frames[0].maxX)
-    #expect(frames[2].maxX <= frames[0].minX)
-    for (index, frame) in frames.enumerated() {
-        for other in frames[(index + 1)...] {
-            #expect(!frame.intersects(other))
+@Test func curvedScreenColumnsAreStraightLines() throws {
+    for screen in [canvas, raisedCurved] {
+        let surface = screen.surface()
+        for x in [Float(-1), -0.3, 0.6, 1] {
+            let top = surface.point(at: SIMD2(x, 1))
+            let bottom = surface.point(at: SIMD2(x, -1))
+            // Every point down the column lies on the line from top to bottom,
+            // so the side edges look straight.
+            for y in [Float(0.5), 0, -0.5] {
+                let point = surface.point(at: SIMD2(x, y))
+                let expected = bottom + (top - bottom) * (y + 1) / 2
+                #expect(simd_distance(point, expected) < 1e-4, "x \(x) y \(y)")
+            }
         }
     }
 }
 
-@Test func referenceFromAScreenArrangesItWhereAsked() {
-    for screen in [
-        canvas,
-        RoomScreen(width: 2880, height: 1620, placement: ScreenPlacement(direction: SIMD3(0.5, 0.2, -1))),
-    ] {
-        let reference = aheadReference(for: screen, arrangedAt: .zero)
-        let origin = screen.placement!.arrangedOrigin(width: screen.width, height: screen.height, around: reference)
-        #expect(abs(origin.x) <= 1 && abs(origin.y) <= 1)
-    }
+@Test func lookingFarToTheSideStillFindsTheCurvedCanvas() throws {
+    let sideways = SIMD3<Float>(sin(1.2), 0, -cos(1.2))
+    let pixel = try #require(gazeTarget(sideways, on: canvas))
+    #expect(pixel.x > 7672 * 0.8)
+    #expect(abs(pixel.y - 1080) < 20)
+    #expect(gazeTarget(SIMD3(0, 0, 1), on: canvas) == nil)
+}
+
+@Test func lookingStraightAtAScreenTargetsItsMiddle() throws {
+    let screen = RoomScreen(width: 1920, height: 1080, placement: ScreenPlacement(direction: SIMD3(0, 0, -1)))
+    let pixel = try #require(gazeTarget(SIMD3(0, 0, -1), on: screen))
+    #expect(simd_distance(pixel, SIMD2(960, 540)) < 1)
 }
 
 @Test func wideScreensAreCapturedInTilesCoveringEveryColumn() {
@@ -211,18 +123,19 @@ private func azimuth(_ point: SIMD3<Float>) -> Float { atan2(point.x, -point.z) 
     #expect(captureTiles(width: 7672).count > 1)
 }
 
-@Test func onlyPanelsNearTheViewCountAsShown() {
+@Test func onlyTilesNearTheViewCountAsShown() {
     var viewport = ViewportController(settings: Settings())
     viewport.recenter(HeadPose())
-    let screens = [
-        RoomScreen(width: 1920, height: 1080, placement: ScreenPlacement(direction: SIMD3(0, 0, -1))),
-        RoomScreen(width: 1920, height: 1080, placement: ScreenPlacement(direction: SIMD3(0, 0, 1))),
-    ]
-    let room = viewport.roomView(screens: screens, outputWidth: 1920, outputHeight: 1080, highlighted: nil)
-    let ahead = room.panels.first { $0.screen == 0 }!
-    let behind = room.panels.first { $0.screen == 1 }!
-    #expect(room.shows(ahead, margin: 0.5))
-    #expect(!room.shows(behind, margin: 0.5))
+    let room = viewport.roomView(canvas: canvas, outputWidth: 1920, outputHeight: 1080, highlighted: false)
+    let middle = room.panels.filter { $0.span.x <= 0 && $0.span.y >= 0 }
+    let outer = room.panels.filter { $0.span.x == -1 || $0.span.y == 1 }
+    #expect(!middle.isEmpty && !outer.isEmpty)
+    for panel in middle {
+        #expect(room.shows(panel, margin: 0.5), "\(panel.span)")
+    }
+    for panel in outer {
+        #expect(!room.shows(panel, margin: 0.5), "\(panel.span)")
+    }
 }
 
 @Test func zoneIsAboutOneViewOfACanvasAroundThePoint() {
@@ -245,4 +158,147 @@ private func azimuth(_ point: SIMD3<Float>) -> Float { atan2(point.x, -point.z) 
     let corner = windowOrigin(size: size, centeredOn: CGPoint(x: 3870, y: 1110), within: screen)
     #expect(CGRect(origin: corner, size: size).maxX <= screen.maxX)
     #expect(CGRect(origin: corner, size: size).maxY <= screen.maxY)
+}
+
+private func arcLength(_ surface: ScreenSurface, from start: SIMD2<Float>, to end: SIMD2<Float>) -> Float {
+    var length: Float = 0
+    var previous = surface.point(at: start)
+    for step in 1...200 {
+        let point = surface.point(at: start + (end - start) * Float(step) / 200)
+        length += simd_distance(point, previous)
+        previous = point
+    }
+    return length
+}
+
+@Test(arguments: [Float(1), 0.5, 2.5])
+func aScreenCurvedLikeAMonitorIsAsWideAtTheTopAsInTheMiddle(radius: Float) throws {
+    for screen in [canvas, raisedCurved] {
+        let surface = screen.surface(curveRadius: radius)
+        let middleRow = arcLength(surface, from: SIMD2(-1, 0), to: SIMD2(1, 0))
+        let middleColumn = arcLength(surface, from: SIMD2(0, -1), to: SIMD2(0, 1))
+        #expect(abs(middleRow - Float(screen.width) * roomUnitsPerPixel) < 0.01)
+        #expect(abs(middleColumn - Float(screen.height) * roomUnitsPerPixel) < 0.01)
+        for y in [Float(1), -1] {
+            #expect(abs(arcLength(surface, from: SIMD2(-1, y), to: SIMD2(1, y)) - middleRow) < 1e-3, "row \(y)")
+        }
+        for x in [Float(1), -1] {
+            #expect(abs(arcLength(surface, from: SIMD2(x, -1), to: SIMD2(x, 1)) - middleColumn) < 1e-3, "column \(x)")
+        }
+    }
+}
+
+@Test func aScreenCurvedLikeAMonitorWrapsAroundTheViewerWithStraightSides() throws {
+    let surface = canvas.surface(curveRadius: 1)
+    let middle = simd_length(surface.point(at: .zero))
+    // Across it wraps around the viewer, as far away at its ends.
+    #expect(abs(simd_length(surface.point(at: SIMD2(1, 0))) - middle) < 1e-3)
+    // Its sides run straight from top to bottom.
+    for x in [Float(-1), 1] {
+        let (top, bottom) = (surface.point(at: SIMD2(x, 1)), surface.point(at: SIMD2(x, -1)))
+        #expect(simd_distance(surface.point(at: SIMD2(x, 0)), (top + bottom) / 2) < 1e-4)
+    }
+}
+
+@Test(arguments: [Float(0.5), 1, 5])
+func lookingAtAPointOnAScreenCurvedLikeAMonitorFindsThatPixel(radius: Float) throws {
+    let surface = raisedCurved.surface(curveRadius: radius)
+    for position in [SIMD2<Float>(0, 0), SIMD2(0.8, 0.9), SIMD2(-0.6, -0.7), SIMD2(0.99, -0.99)] {
+        let gaze = simd_normalize(surface.point(at: position))
+        let pixel = try #require(gazeTarget(gaze, on: raisedCurved, curveRadius: radius))
+        let expected = SIMD2((position.x + 1) * 0.5 * 5120, (1 - position.y) * 0.5 * 1440)
+        #expect(simd_distance(pixel, expected) < 2, "\(position): \(pixel)")
+    }
+}
+
+@Test func aScreenPixelIsFoundWhereItHangsInTheRoom() {
+    let placement = ScreenPlacement(direction: SIMD3(sin(0.6), 0.1, -cos(0.6)))
+    let screen = RoomScreen(width: 1920, height: 1080, placement: placement, curved: true)
+    let surface = screen.surface()
+    let topLeft = screen.roomPoint(ofPixel: SIMD2(0, 0))
+    let middle = screen.roomPoint(ofPixel: SIMD2(960, 540))
+    #expect(simd_distance(topLeft, surface.point(at: SIMD2(-1, 1))) < 1e-4)
+    #expect(simd_distance(simd_normalize(middle), placement.direction) < 1e-4)
+}
+
+@Test func zoomingOutBringsAPointBesideTheViewIntoSight() {
+    let tanHalf = tan(horizontalFov * 0.5)
+    let room = RoomView(headRotation: matrix_identity_float3x3, tanHalfFov: SIMD2(tanHalf, tanHalf * 9 / 16), panels: [])
+    let beside = SIMD3<Float>(sin(0.7), 0, -cos(0.7))
+    #expect(!room.shows(beside, scale: 1, margin: 0.9))
+    #expect(room.shows(beside, scale: 0.3, margin: 0.9))
+    // Behind the viewer no zoom helps.
+    #expect(room.isAhead(beside))
+    #expect(!room.isAhead(SIMD3(0, 0, 1)))
+}
+
+@Test func aGentlerCurveBendsTheEdgesLess() throws {
+    let even = canvas.surface(curveRadius: 1)
+    let gentle = canvas.surface(curveRadius: 2.5)
+    // The middle stays where the screen hangs.
+    #expect(simd_distance(gentle.point(at: .zero), even.point(at: .zero)) < 1e-4)
+    for edge in [SIMD2<Float>(1, 0), SIMD2(-1, 0), SIMD2(0.8, -0.9)] {
+        #expect(simd_length(gentle.point(at: edge)) > simd_length(even.point(at: edge)) + 0.01, "\(edge)")
+    }
+}
+
+@Test func lookingAtAPointOnAGentlyCurvedScreenFindsThatPixel() throws {
+    let surface = raisedCurved.surface(curveRadius: 2.5)
+    for position in [SIMD2<Float>(0, 0), SIMD2(0.8, 0.9), SIMD2(-0.6, -0.7)] {
+        let gaze = simd_normalize(surface.point(at: position))
+        let pixel = try #require(gazeTarget(gaze, on: raisedCurved, curveRadius: 2.5))
+        let expected = SIMD2((position.x + 1) * 0.5 * 5120, (1 - position.y) * 0.5 * 1440)
+        #expect(simd_distance(pixel, expected) < 2, "\(position): \(pixel)")
+    }
+}
+
+/// The head turned by `yaw` and tilted by `roll`, as the viewport builds it.
+private func headRotation(yaw: Float = 0, roll: Float) -> simd_float3x3 {
+    var viewport = ViewportController(settings: Settings())
+    viewport.recenter(HeadPose())
+    viewport.track(pose: HeadPose(yaw: yaw, roll: roll))
+    return viewport.headRotation
+}
+
+@Test(arguments: [false, true])
+func aScreenCarriedWithTheHeadTiltedKeepsThatTilt(curved: Bool) throws {
+    let start = ScreenPlacement(direction: SIMD3(0, 0, -1))
+    let grab = ScreenGrab(placement: start, headRotation: headRotation(roll: 0))
+
+    // Carried a little to the side with the head tilted, then let go.
+    let tiltedHead = headRotation(yaw: 0.3, roll: 0.25)
+    let dropped = grab.placement(headRotation: tiltedHead, distance: start.distance)
+    let screen = RoomScreen(width: 1920, height: 1080, placement: dropped, curved: curved)
+    let surface = screen.surface()
+
+    // Seen with the head tilted like that, it looks upright...
+    let top = tiltedHead.transpose * surface.point(at: SIMD2(0, 1))
+    let bottom = tiltedHead.transpose * surface.point(at: SIMD2(0, -1))
+    let upInView = normalize(top - bottom)
+    #expect(abs(upInView.x) < 0.01, "up in view \(upInView)")
+
+    // ...so with the head straight again it leans by the tilt.
+    let straight = headRotation(yaw: 0.3, roll: 0)
+    let upStraight = normalize(straight.transpose * surface.point(at: SIMD2(0, 1)) - straight.transpose * surface.point(at: SIMD2(0, -1)))
+    #expect(abs(abs(asin(upStraight.x)) - 0.25) < 0.02, "leans \(asin(upStraight.x)) rad")
+}
+
+@Test(arguments: [false, true])
+func lookingAtATiltedScreenFindsThePixelThere(curved: Bool) throws {
+    let placement = ScreenPlacement(direction: normalize(SIMD3(0.3, 0.1, -1)), distance: 1.2, tilt: 0.4)
+    let screen = RoomScreen(width: 2880, height: 1620, placement: placement, curved: curved)
+    let surface = screen.surface()
+    for position in [SIMD2<Float>(0.6, 0.4), SIMD2(-0.7, -0.5), SIMD2(0, 0.9)] {
+        let gaze = normalize(surface.point(at: position))
+        let hit = try #require(surface.hit(gaze: gaze))
+        #expect(simd_distance(hit.at, SIMD2(position.x, -position.y)) < 1e-3, "at \(position): \(hit.at)")
+    }
+}
+
+@Test func theCanvasTiltIsKeptAfterARestart() {
+    var settings = Settings()
+    settings.canvas.placement = ScreenPlacement(direction: SIMD3(0, 0, -1), tilt: -0.3)
+    #expect(abs(Settings.parse(settings.serialize()).canvas.placement.tilt - -0.3) < 1e-6)
+    settings.canvas.placement.tilt = 0
+    #expect(Settings.parse(settings.serialize()).canvas.placement.tilt == 0)
 }

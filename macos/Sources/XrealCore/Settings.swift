@@ -1,56 +1,36 @@
 import Foundation
 
-/// What the glasses show: the main display, or a virtual display that only
-/// exists inside the glasses.
-public enum CaptureSource: String, Sendable {
-    case mirror
-    case virtual
-}
-
-/// How the source image is laid out in front of the viewer.
-public enum Projection: String, Sendable, CaseIterable {
-    /// A pixel-exact window onto the source, moved by head turns.
-    case crop
-    /// A flat virtual monitor fixed in the room.
-    case flat
-    /// A virtual monitor curved around the viewer, fixed in the room.
-    case curved
-}
-
-/// What the crop projection shows when looking past the edge of the source.
-public enum EdgeMode: String, Sendable {
-    /// The view stops at the edge.
-    case snap
-    /// The view keeps moving and shows black beyond the edge.
-    case black
-}
+/// The flattest curve kept, as a multiple of a screen's distance.
+private let maxCurveRadius: Float = 10
 
 /// User-tunable settings, persisted between runs as `key=value` lines. The
 /// file is shared with the Rust version of the app.
 public struct Settings: Equatable, Sendable {
-    public var zoomIndex = 2
-    public var sensitivity: Float = 1.0
-    public var deadzoneIndex = 3
     public var prediction = true
     /// Whether the status lines show in the menu bar menu.
     public var overlayVisible = true
+    /// Gyro bias at the tracking's reference temperature, rad/s.
     public var gyroBias: SIMD3<Float> = .zero
-    public var source = CaptureSource.mirror
-    /// A wide screen above the main display and one on each side. macOS 27
-    /// refuses some standard sizes, such as 3840 × 2160; these work.
-    public var screens = [
-        RoomScreen(width: 5120, height: 1440), RoomScreen(width: 2880, height: 1620),
-        RoomScreen(width: 2880, height: 1620),
-    ]
-    /// The screens used while the glasses are the only display, such as with
-    /// the laptop lid closed: one wide canvas curved around the viewer.
-    public var glassesOnlyScreens = [RoomScreen(width: 7672, height: 2160, curved: true)]
-    public var projection = Projection.crop
-    /// Room projections tilt with the head so the screen stays level.
+    /// How the gyro bias changes per °C, rad/s, as learned so far.
+    public var gyroBiasSlope: SIMD3<Float> = .zero
+    /// The one virtual screen, shown only in the glasses: wide and curved,
+    /// straight ahead. macOS 27 refuses some standard sizes, such as
+    /// 5760 × 2160; this one works.
+    public var canvas = RoomScreen(width: 5752, height: 2160, curved: true)
+    /// The canvas tilts with the head so it stays level.
     public var followRoll = true
-    public var edge = EdgeMode.snap
     /// Zoom out while the mouse moves outside the view.
     public var followCursor = true
+    /// The radius the canvas bends with when curved, as a multiple of its
+    /// distance: 1 surrounds the viewer evenly, less bends it more, more
+    /// bends it less.
+    public var curveRadius: Float = 1
+    /// Shows the left eye's view to the right eye and the other way round,
+    /// for glasses that take the side-by-side halves the other way.
+    public var swapEyes = false
+    /// How many metres a room unit is: the canvas at distance 1 is this far
+    /// away. Nearer shows more depth between its parts.
+    public var metresPerRoomUnit: Float = 1
 
     public init() {}
 
@@ -76,77 +56,73 @@ public struct Settings: Equatable, Sendable {
     /// Unknown keys and malformed values fall back to the defaults.
     public static func parse(_ text: String) -> Settings {
         var settings = Settings()
-        var screens: [RoomScreen] = []
-        var glassesOnlyScreens: [RoomScreen] = []
-        // Written before several screens were supported.
-        var legacyWidth: Int?
-        var legacyHeight: Int?
+        var canvas: RoomScreen?
+        // Written when there were several screens: the first one used with
+        // the glasses alone was the canvas.
+        var glassesOnlyScreen: RoomScreen?
         for line in text.split(whereSeparator: \.isNewline) {
             guard let separator = line.firstIndex(of: "=") else { continue }
             let key = line[..<separator].trimmingCharacters(in: .whitespaces)
             let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespaces)
             switch key {
-            case "zoom_index": parse(value, into: &settings.zoomIndex, as: UInt.self)
-            case "sensitivity": parse(value, into: &settings.sensitivity)
-            case "deadzone_index": parse(value, into: &settings.deadzoneIndex, as: UInt.self)
             case "prediction": parse(value, into: &settings.prediction)
             case "overlay_visible": parse(value, into: &settings.overlayVisible)
             case "gyro_bias_x": parse(value, into: &settings.gyroBias.x)
             case "gyro_bias_y": parse(value, into: &settings.gyroBias.y)
             case "gyro_bias_z": parse(value, into: &settings.gyroBias.z)
-            case "source": settings.source = CaptureSource(rawValue: value) ?? settings.source
-            case "screen": parseScreen(value).map { screens.append($0) }
-            case "glasses_only_screen": parseScreen(value).map { glassesOnlyScreens.append($0) }
-            case "virtual_width": legacyWidth = UInt(value).flatMap { Int(exactly: $0) }
-            case "virtual_height": legacyHeight = UInt(value).flatMap { Int(exactly: $0) }
-            case "projection": settings.projection = Projection(rawValue: value) ?? settings.projection
+            case "gyro_bias_slope_x": parse(value, into: &settings.gyroBiasSlope.x)
+            case "gyro_bias_slope_y": parse(value, into: &settings.gyroBiasSlope.y)
+            case "gyro_bias_slope_z": parse(value, into: &settings.gyroBiasSlope.z)
+            case "canvas": canvas = canvas ?? parseScreen(value)
+            case "glasses_only_screen": glassesOnlyScreen = glassesOnlyScreen ?? parseScreen(value)
             case "follow_roll": parse(value, into: &settings.followRoll)
-            case "edge": settings.edge = EdgeMode(rawValue: value) ?? settings.edge
             case "follow_cursor": parse(value, into: &settings.followCursor)
+            case "swap_eyes": parse(value, into: &settings.swapEyes)
+            case "metres_per_room_unit":
+                if let metres = Float(value), metres.isFinite, metres > 0 {
+                    settings.metresPerRoomUnit = min(max(metres, 0.25), 20)
+                }
+            case "curve_radius", "sphere_curve":
+                if let radius = Float(value), radius.isFinite, radius > 0 {
+                    settings.curveRadius = min(radius, maxCurveRadius)
+                }
             default: break
             }
         }
-        if !glassesOnlyScreens.isEmpty {
-            settings.glassesOnlyScreens = glassesOnlyScreens
-        }
-        if !screens.isEmpty {
-            settings.screens = screens
-        } else if let legacyWidth, let legacyHeight, Self.isScreenSize(legacyWidth, legacyHeight) {
-            settings.screens = [RoomScreen(width: legacyWidth, height: legacyHeight)]
+        if let screen = canvas ?? glassesOnlyScreen {
+            settings.canvas = screen
         }
         return settings
     }
 
     public func serialize() -> String {
-        let lines =
-            [
-                "zoom_index=\(zoomIndex)",
-                "sensitivity=\(sensitivity)",
-                "deadzone_index=\(deadzoneIndex)",
-                "prediction=\(prediction)",
-                "overlay_visible=\(overlayVisible)",
-                "gyro_bias_x=\(gyroBias.x)",
-                "gyro_bias_y=\(gyroBias.y)",
-                "gyro_bias_z=\(gyroBias.z)",
-                "source=\(source.rawValue)",
-            ] + screens.map { "screen=\(Self.serialize($0))" }
-            + glassesOnlyScreens.map { "glasses_only_screen=\(Self.serialize($0))" }
-            + [
-                "projection=\(projection.rawValue)",
-                "follow_roll=\(followRoll)",
-                "edge=\(edge.rawValue)",
-                "follow_cursor=\(followCursor)",
-            ]
+        let lines = [
+            "prediction=\(prediction)",
+            "overlay_visible=\(overlayVisible)",
+            "gyro_bias_x=\(gyroBias.x)",
+            "gyro_bias_y=\(gyroBias.y)",
+            "gyro_bias_z=\(gyroBias.z)",
+            "gyro_bias_slope_x=\(gyroBiasSlope.x)",
+            "gyro_bias_slope_y=\(gyroBiasSlope.y)",
+            "gyro_bias_slope_z=\(gyroBiasSlope.z)",
+            "canvas=\(Self.serialize(canvas))",
+            "follow_roll=\(followRoll)",
+            "follow_cursor=\(followCursor)",
+            "curve_radius=\(curveRadius)",
+            "swap_eyes=\(swapEyes)",
+            "metres_per_room_unit=\(metresPerRoomUnit)",
+        ]
         return lines.map { $0 + "\n" }.joined()
     }
 
     /// `WIDTHxHEIGHT`, `,curved` for a curved screen, then
-    /// `@x,y,z,distance` once the screen is placed.
+    /// `@x,y,z,distance` for where it hangs, and `,tilt` if it is tilted.
     private static func serialize(_ screen: RoomScreen) -> String {
         let size = "\(screen.width)x\(screen.height)" + (screen.curved ? ",curved" : "")
-        guard let placement = screen.placement else { return size }
+        let placement = screen.placement
         let d = placement.direction
         return size + "@\(d.x),\(d.y),\(d.z),\(placement.distance)"
+            + (placement.tilt == 0 ? "" : ",\(placement.tilt)")
     }
 
     private static func parseScreen(_ value: String) -> RoomScreen? {
@@ -159,9 +135,11 @@ public struct Settings: Equatable, Sendable {
         var screen = RoomScreen(width: width, height: height, curved: shape.dropFirst().contains("curved"))
         if parts.count == 2 {
             let numbers = parts[1].split(separator: ",").compactMap { Float($0) }
-            if numbers.count == 4, numbers.allSatisfy(\.isFinite) {
+            // Written before screens could be tilted: without the tilt.
+            if numbers.count == 4 || numbers.count == 5, numbers.allSatisfy(\.isFinite) {
                 screen.placement = ScreenPlacement(
-                    direction: SIMD3(numbers[0], numbers[1], numbers[2]), distance: numbers[3])
+                    direction: SIMD3(numbers[0], numbers[1], numbers[2]), distance: numbers[3],
+                    tilt: numbers.count == 5 ? numbers[4] : 0)
             }
         }
         return screen
@@ -178,10 +156,4 @@ public struct Settings: Equatable, Sendable {
         }
     }
 
-    /// Parses through an unsigned type so negative indices are rejected.
-    private static func parse(_ value: String, into target: inout Int, as _: UInt.Type) {
-        if let parsed = UInt(value), let fits = Int(exactly: parsed) {
-            target = fits
-        }
-    }
 }

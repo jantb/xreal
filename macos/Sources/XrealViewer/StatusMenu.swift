@@ -22,6 +22,57 @@ private final class ActionItem: NSMenuItem {
     @objc private func fire() { handler() }
 }
 
+/// A menu item holding a titled slider, for settings that are easier to
+/// tune by feel than to pick from a list. `onChange` runs while dragging.
+@MainActor private final class SliderItem: NSMenuItem {
+    private let onChange: (Float) -> Void
+    private let format: (Float) -> String
+    private let valueLabel = NSTextField(labelWithString: "")
+    private let slider: NSSlider
+    // The slider runs over log(value), so each step feels the same size.
+    private let logarithmic: Bool
+
+    init(
+        _ title: String, value: Float, range: ClosedRange<Float>, logarithmic: Bool = false,
+        format: @escaping (Float) -> String, onChange: @escaping (Float) -> Void
+    ) {
+        self.onChange = onChange
+        self.format = format
+        self.logarithmic = logarithmic
+        let map = { (v: Float) in Double(logarithmic ? log(v) : v) }
+        slider = NSSlider(value: map(value), minValue: map(range.lowerBound), maxValue: map(range.upperBound), target: nil, action: nil)
+        super.init(title: title, action: nil, keyEquivalent: "")
+
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .menuFont(ofSize: 0)
+        valueLabel.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        valueLabel.textColor = .secondaryLabelColor
+        valueLabel.alignment = .right
+        slider.isContinuous = true
+        slider.target = self
+        slider.action = #selector(changed)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 48))
+        titleLabel.frame = NSRect(x: 20, y: 26, width: 150, height: 18)
+        valueLabel.frame = NSRect(x: 170, y: 26, width: 74, height: 18)
+        slider.frame = NSRect(x: 18, y: 4, width: 228, height: 22)
+        for subview in [titleLabel, valueLabel, slider] {
+            container.addSubview(subview)
+        }
+        view = container
+        valueLabel.stringValue = format(value)
+    }
+
+    @available(*, unavailable)
+    required init(coder: NSCoder) { fatalError("not used") }
+
+    @objc private func changed() {
+        let raw = Float(slider.doubleValue)
+        let value = logarithmic ? exp(raw) : raw
+        valueLabel.stringValue = format(value)
+        onChange(value)
+    }
+}
+
 /// The menu bar icon and its menu, where everything about the view is
 /// adjusted. The menu is rebuilt each time it opens, so it always shows the
 /// current settings; the status lines refresh while it stays open.
@@ -38,6 +89,8 @@ private final class ActionItem: NSMenuItem {
         image?.isTemplate = true
         statusItem.button?.image = image
         let menu = NSMenu()
+        // Items are enabled by what applies now, not by having a target.
+        menu.autoenablesItems = false
         menu.delegate = self
         statusItem.menu = menu
     }
@@ -62,130 +115,78 @@ private final class ActionItem: NSMenuItem {
 
     private func rebuild(_ menu: NSMenu) {
         menu.removeAllItems()
-        let (settings, viewport, screenList, glassesOnly) = viewer.current
+        let (settings, viewport) = viewer.current
+        let canvas = settings.canvas
 
-        if glassesOnly {
-            menu.addItem(hint("Glasses Only: Lid Closed"))
-        }
         let recenter = ActionItem("Recenter", key: "c") { [viewer] in viewer.perform(.recenter) }
         recenter.keyEquivalentModifierMask = [.control, .option, .command]
         menu.addItem(recenter)
-        menu.addItem(ActionItem("Freeze View", checked: viewport.frozen) { [viewer] in viewer.perform(.toggleFreeze) })
         menu.addItem(.separator())
 
-        let source = submenu(
-            "Source",
-            SourceChoice.all.map { choice in
-                ActionItem(choice.title, checked: choice.isSelected(in: settings)) { [viewer] in
-                    viewer.perform(.setSource(choice))
+        let curve = submenu(
+            "Curve",
+            curveRadii.map { curve in
+                ActionItem(curve.title, checked: settings.curveRadius == curve.radius) { [viewer] in
+                    viewer.perform(.setCurveRadius(curve.radius))
                 }
             })
-        // With the glasses alone there is no display to mirror.
-        source.isEnabled = !glassesOnly
-        menu.addItem(source)
-        let virtual = glassesOnly || settings.source == .virtual
-        let screens = submenu(
-            "Virtual Screens",
-            screenList.enumerated().map { index, screen in
-                ActionItem(
-                    "Screen \(index + 1): \(screen.width) × \(screen.height), Curved", checked: screen.curved
-                ) { [viewer] in viewer.perform(.toggleCurved(index)) }
-            } + [
-                .separator(),
-                submenu(
-                    "Add Screen",
-                    virtualScreenSizes.map { size in
-                        ActionItem("\(size.width) × \(size.height)") { [viewer] in
-                            viewer.perform(.addScreen(width: size.width, height: size.height, curved: false))
-                        }
-                    } + [.separator()]
-                        + canvasSizes.map { size in
-                            ActionItem("Curved Canvas \(size.width) × \(size.height)") { [viewer] in
-                                viewer.perform(.addScreen(width: size.width, height: size.height, curved: true))
-                            }
-                        }),
-                removeScreens(screenList),
-                ActionItem(
-                    glassesOnly ? "Standard Layout: First Ahead, Others Beside" : "Standard Layout: Wide Above, One Each Side"
-                ) { [viewer] in
-                    viewer.perform(.standardLayout)
-                },
-                .separator(),
-                hint("Look at a screen and hold ⌃⌥⌘G to carry it"),
-                hint("⌃⌥⌘= brings it closer, ⌃⌥⌘- pushes it away"),
-            ])
-        screens.isEnabled = virtual
-        menu.addItem(screens)
-        let windows = submenu(
-            "Windows",
-            [
-                shortcut("Move Window to Where You Look", "w") { [viewer] in viewer.perform(.moveWindowToGaze) },
-                shortcut("Fit Window to Zone You Look At", "f") { [viewer] in viewer.perform(.fitWindowToZone) },
-                shortcut("Move Pointer to Where You Look", "m") { [viewer] in viewer.perform(.movePointerToGaze) },
-                ActionItem("Bring Back Windows Hidden Behind the Glasses") { [viewer] in
-                    viewer.perform(.gatherWindows)
-                },
-            ] + (WindowControl.allowed(prompt: false)
-                ? [] : [.separator(), hint("Moving windows needs Accessibility access")]))
-        windows.isEnabled = virtual
-        menu.addItem(windows)
-        let projections: [(Projection, String)] = [
-            (.crop, "Pixel Exact"), (.flat, "Flat Screen in Room"), (.curved, "Curved Screen in Room"),
-        ]
-        let room = virtual || viewport.projection != .crop
-        let roll = ActionItem("Follow Head Tilt", checked: viewport.followsRoll) { [viewer] in
-            viewer.perform(.toggleRoll)
-        }
-        roll.isEnabled = room
-        let view = submenu(
-            "View",
-            projections.map { projection, title in
-                let item = ActionItem(title, checked: viewport.projection == projection) { [viewer] in
-                    viewer.perform(.setProjection(projection))
-                }
-                // Virtual screens always hang flat in the room.
-                item.isEnabled = !virtual
-                return item
-            } + [.separator(), roll])
-        menu.addItem(view)
-        let edges: [(EdgeMode, String)] = [(.snap, "Stop at Edge"), (.black, "Show Black Beyond Edge")]
-        let edge = submenu(
-            "At Screen Edge",
-            edges.map { edge, title in
-                ActionItem(title, checked: viewport.edge == edge) { [viewer] in viewer.perform(.setEdge(edge)) }
-            })
-        edge.isEnabled = !room
-        menu.addItem(edge)
+        curve.isEnabled = canvas.curved
         menu.addItem(
             submenu(
-                String(format: "Zoom %.2g×", viewport.zoom),
-                zoomLevels.enumerated().map { index, level in
-                    ActionItem(String(format: "%.2g×", level), checked: viewport.zoomIndex == index) { [viewer] in
-                        viewer.perform(.setZoom(index))
-                    }
-                }))
-        menu.addItem(
-            submenu(
-                String(format: "Sensitivity %.2f×", viewport.sensitivity),
+                "Canvas",
                 [
-                    ActionItem("Increase", key: ".") { [viewer] in viewer.perform(.increaseSensitivity) },
-                    ActionItem("Decrease", key: ",") { [viewer] in viewer.perform(.decreaseSensitivity) },
-                    ActionItem("Reset to 1×") { [viewer] in viewer.perform(.resetSensitivity) },
+                    ActionItem("\(canvas.width) × \(canvas.height), Curved", checked: canvas.curved) { [viewer] in
+                        viewer.perform(.toggleCurved)
+                    },
+                    curve,
+                    .separator(),
+                    hint("Look at the canvas and hold ⌃⌥⌘G to carry it"),
+                    hint("⌃⌥⌘= brings it closer, ⌃⌥⌘- pushes it away"),
+                    hint("⌃⌥⌘] gives it the next size up, ⌃⌥⌘[ the next down"),
                 ]))
         menu.addItem(
             submenu(
-                "Deadzone",
-                deadzoneLevels.enumerated().map { index, level in
-                    let title = level == 0 ? "Off" : String(format: "%.1f°", level * 180 / .pi)
-                    return ActionItem(title, checked: viewport.deadzoneIndex == index) { [viewer] in
-                        viewer.perform(.setDeadzone(index))
-                    }
-                }))
-        let followCursor = ActionItem("Zoom Out to Show Cursor", checked: settings.followCursor) { [viewer] in
-            viewer.perform(.toggleFollowCursor)
+                "Windows",
+                [
+                    shortcut("Move Window to Where You Look", "w") { [viewer] in viewer.perform(.moveWindowToGaze) },
+                    shortcut("Fit Window to Zone You Look At", "f") { [viewer] in viewer.perform(.fitWindowToZone) },
+                    shortcut("Move Pointer to Where You Look", "m") { [viewer] in viewer.perform(.movePointerToGaze) },
+                    ActionItem("Bring Back Windows Hidden Behind the Glasses") { [viewer] in
+                        viewer.perform(.gatherWindows)
+                    },
+                ] + (WindowControl.allowed(prompt: false)
+                    ? [] : [.separator(), hint("Moving windows needs Accessibility access")])))
+        // How far away the canvas at distance 1 looks: nearer shows more
+        // depth between the eyes' views, further less. Its size stays the
+        // same.
+        let viewingDistance = SliderItem(
+            "Viewing Distance", value: settings.metresPerRoomUnit, range: minViewingDistance...maxViewingDistance,
+            logarithmic: true, format: { String(format: "%.2f m", $0) }
+        ) { [viewer] metres in
+            viewer.perform(.setDepthScale(metres))
         }
-        followCursor.isEnabled = !virtual
-        menu.addItem(followCursor)
+        menu.addItem(
+            submenu(
+                "View",
+                [
+                    ActionItem("Follow Head Tilt", checked: viewport.followsRoll) { [viewer] in
+                        viewer.perform(.toggleRoll)
+                    },
+                    submenu(
+                        "3D Depth",
+                        [viewingDistance, .separator()]
+                            + depthScales.map { scale in
+                                ActionItem(scale.title, checked: settings.metresPerRoomUnit == scale.metres) {
+                                    [viewer] in
+                                    viewer.perform(.setDepthScale(scale.metres))
+                                }
+                            }),
+                    ActionItem("Swap Eyes", checked: settings.swapEyes) { [viewer] in viewer.perform(.toggleSwapEyes) },
+                ]))
+        menu.addItem(
+            ActionItem("Zoom Out to Show Cursor", checked: settings.followCursor) { [viewer] in
+                viewer.perform(.toggleFollowCursor)
+            })
         menu.addItem(
             ActionItem("Predict Head Motion", checked: settings.prediction) { [viewer] in
                 viewer.perform(.togglePrediction)
@@ -193,7 +194,7 @@ private final class ActionItem: NSMenuItem {
         menu.addItem(.separator())
 
         menu.addItem(ActionItem("Calibrate Gyro (Keep Glasses Still)") { [viewer] in viewer.perform(.calibrate) })
-        menu.addItem(ActionItem("Reset View Settings") { [viewer] in viewer.perform(.resetView) })
+        menu.addItem(ActionItem("Put Canvas Back Straight Ahead") { [viewer] in viewer.perform(.resetView) })
         menu.addItem(.separator())
 
         menu.addItem(ActionItem("Show Status", checked: settings.overlayVisible) { [viewer] in
@@ -213,19 +214,6 @@ private final class ActionItem: NSMenuItem {
         menu.addItem(ActionItem("Quit XREAL Viewer", key: "q") { NSApp.terminate(nil) })
     }
 
-    private func removeScreens(_ screens: [RoomScreen]) -> NSMenuItem {
-        let item = submenu(
-            "Remove Screen",
-            screens.enumerated().map { index, screen in
-                ActionItem("Screen \(index + 1): \(screen.width) × \(screen.height)") { [viewer] in
-                    viewer.perform(.removeScreen(index))
-                }
-            })
-        // At least one screen stays.
-        item.isEnabled = screens.count > 1
-        return item
-    }
-
     /// An item showing its global shortcut, ⌃⌥⌘ and `key`.
     private func shortcut(_ title: String, _ key: String, handler: @escaping () -> Void) -> NSMenuItem {
         let item = ActionItem(title, key: key, handler: handler)
@@ -242,6 +230,7 @@ private final class ActionItem: NSMenuItem {
     private func submenu(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         let menu = NSMenu()
+        menu.autoenablesItems = false
         items.forEach(menu.addItem)
         item.submenu = menu
         return item

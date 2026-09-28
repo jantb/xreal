@@ -24,6 +24,8 @@ public final class NrealAir {
     private let imu: HIDDevice
     private var pendingPackets: [McuPacket] = []
     private var biases = ImuBiases()
+    /// The glasses' factory calibration, as JSON.
+    public private(set) var config = Data()
 
     public init() throws {
         let interfaces = HIDDevice.all(vendorID: Self.vendorID)
@@ -40,7 +42,8 @@ public final class NrealAir {
 
         // The IMU stream is paused while the config is read.
         _ = try imuCommand(0x19, [0])
-        biases = try ImuBiases.parse(config: readConfig())
+        config = try readConfig()
+        biases = try ImuBiases.parse(config: config)
         _ = try imuCommand(0x19, [1])
         // Quick check that the MCU answers.
         _ = try serial()

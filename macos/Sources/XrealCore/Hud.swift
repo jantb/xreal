@@ -25,12 +25,10 @@ public struct RenderStats: Sendable {
 }
 
 public struct HudInfo {
-    public var viewport: ViewportController
-    public var geometry: ViewGeometry?
-    /// Extra zoom-out while following the cursor, 1 meaning none.
-    public var followScale: Float
+    /// The pixel of the canvas looked at, nil when looking away from it.
+    public var gaze: SIMD2<Float>?
     public var source: (width: Int, height: Int)?
-    /// Where the picture comes from, e.g. "MIRROR MAIN DISPLAY".
+    /// What the glasses show, e.g. "CANVAS 5752X2160".
     public var sourceDescription: String
     public var output: (width: Int, height: Int)
     public var newFrame: Bool
@@ -42,15 +40,11 @@ public struct HudInfo {
     public var now: Double
 
     public init(
-        viewport: ViewportController, geometry: ViewGeometry?, followScale: Float,
-        source: (width: Int, height: Int)?,
-        sourceDescription: String, output: (width: Int, height: Int), newFrame: Bool,
-        stats: RenderStats, tracking: TrackingSnapshot, pose: HeadPose, prediction: Bool,
-        lastDrift: DriftObservation?, now: Double
+        gaze: SIMD2<Float>?, source: (width: Int, height: Int)?, sourceDescription: String,
+        output: (width: Int, height: Int), newFrame: Bool, stats: RenderStats, tracking: TrackingSnapshot,
+        pose: HeadPose, prediction: Bool, lastDrift: DriftObservation?, now: Double
     ) {
-        self.viewport = viewport
-        self.geometry = geometry
-        self.followScale = followScale
+        self.gaze = gaze
         self.source = source
         self.sourceDescription = sourceDescription
         self.output = output
@@ -65,7 +59,6 @@ public struct HudInfo {
 }
 
 public func hudLines(_ info: HudInfo) -> [String] {
-    let state = info.viewport.frozen ? "FROZEN" : "LIVE"
     let frameState = info.newFrame ? "NEW" : "HOLD"
     let tracking = info.tracking
 
@@ -97,38 +90,21 @@ public func hudLines(_ info: HudInfo) -> [String] {
     }
 
     let source = info.source.map { "SRC \($0.width)X\($0.height)" } ?? "SRC NO CAPTURE YET"
-    let view: String
-    switch info.geometry {
-    case nil: view = "VIEW -"
-    case .crop(let rect):
-        view = String(format: "VIEW CROP %.0f,%.0f %.0fX%.0f", rect.x, rect.y, rect.width, rect.height)
-    case .spatial(let spatial):
-        let middle = spatial.sourcePoint(atOutput: .zero)
-        view =
-            (spatial.curved ? "VIEW CURVED" : "VIEW FLAT")
-            + (middle.map { String(format: " LOOKING AT %.0f,%.0f", $0.x, $0.y) } ?? " LOOKING AWAY")
-    case .room(let room):
-        let looked = room.panels.first(where: \.highlighted).map { " LOOKING AT SCREEN \($0.screen + 1)" } ?? ""
-        let screens = Set(room.panels.map(\.screen)).count
-        view = "VIEW ROOM \(screens) SCREENS" + looked
-    }
+    let view = info.gaze.map { String(format: "LOOKING AT %.0f,%.0f", $0.x, $0.y) } ?? "LOOKING AWAY FROM THE CANVAS"
     let bias = tracking.gyroBias
+    let temperature = tracking.temperature.map { String(format: "  TEMP %.1fC", $0) } ?? ""
 
     return [
-        String(
-            format: "%@ %@  %.0fFPS  CAPTURE %.0fFPS  ZOOM %.2fX", state, frameState, info.stats.fps,
-            info.stats.captureFps, info.viewport.zoom * info.followScale),
+        String(format: "%@  %.0fFPS  CAPTURE %.0fFPS", frameState, info.stats.fps, info.stats.captureFps),
         imu,
-        String(format: "BIAS %.4f %.4f %.4f  ", bias.x, bias.y, bias.z)
-            + (tracking.still ? "STILL" : "MOVING") + calibration,
+        String(format: "BIAS %.4f %.4f %.4f", bias.x, bias.y, bias.z) + temperature
+            + "  LEARNED \(tracking.learnedWindows)  " + (tracking.still ? "STILL" : "MOVING") + calibration,
         drift,
         info.sourceDescription,
         "\(source)  OUT \(info.output.width)X\(info.output.height)",
         view,
         String(
-            format: "YAW %.3f  PITCH %.3f  ROLL %.3f", info.pose.yaw, info.pose.pitch, info.pose.roll),
-        String(
-            format: "SENS %.2fX  DEADZONE %.3f  PREDICT %@", info.viewport.sensitivity, info.viewport.deadzone,
+            format: "YAW %.3f  PITCH %.3f  ROLL %.3f  PREDICT %@", info.pose.yaw, info.pose.pitch, info.pose.roll,
             info.prediction ? "ON" : "OFF"),
     ]
 }

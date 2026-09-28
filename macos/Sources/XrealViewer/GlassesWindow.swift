@@ -1,7 +1,7 @@
 import AppKit
 import QuartzCore
 
-/// Identifies the glasses and picks what to mirror.
+/// Identifies the glasses and the other displays.
 enum Displays {
     /// EDID manufacturer "MRG", which all XREAL glasses report.
     private static let glassesVendor: UInt32 = 0x3647
@@ -10,7 +10,7 @@ enum Displays {
         CGDisplayVendorNumber(id) == glassesVendor
     }
 
-    /// Vendor number of the virtual screens this app creates.
+    /// Vendor number of the virtual screen this app creates.
     static let virtualScreenVendor: UInt32 = 0x5852  // "XR"
 
     static func glassesScreen() -> NSScreen? {
@@ -21,25 +21,34 @@ enum Displays {
         active().first(where: isGlasses)
     }
 
-    /// A display the viewer can see in the room, such as the laptop's own
-    /// screen: neither the glasses nor one of this app's virtual screens.
+    /// A display outside the glasses, such as the laptop's own screen:
+    /// neither the glasses nor this app's canvas.
     static func isReal(_ id: CGDirectDisplayID) -> Bool {
         !isGlasses(id) && CGDisplayVendorNumber(id) != virtualScreenVendor
     }
 
-    /// Whether the glasses are connected and are the only real display,
-    /// as with the laptop lid closed. `virtualScreens` are this app's own.
-    static func glassesOnly(besides virtualScreens: Set<CGDirectDisplayID>) -> Bool {
-        let displays = active().filter { !virtualScreens.contains($0) }
-        return displays.contains(where: isGlasses) && !displays.contains(where: isReal)
+    /// Takes the glasses out of any mirroring, of another display or by
+    /// another display. macOS sometimes mirrors them when displays come and
+    /// go, which hides the viewer's window and starves it of frames. Returns
+    /// whether anything changed.
+    @discardableResult
+    static func unmirrorGlasses() -> Bool {
+        guard let glasses = online().first(where: isGlasses), CGDisplayIsInMirrorSet(glasses) != 0 else { return false }
+        var config: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&config) == .success, let config else { return false }
+        CGConfigureDisplayMirrorOfDisplay(config, glasses, kCGNullDirectDisplay)
+        for other in online() where CGDisplayMirrorsDisplay(other) == glasses {
+            CGConfigureDisplayMirrorOfDisplay(config, other, kCGNullDirectDisplay)
+        }
+        return CGCompleteDisplayConfiguration(config, .forSession) == .success
     }
 
-    /// The main display, or another real display when the main one is the
-    /// glasses or a virtual screen.
-    static func mirrorSource() -> CGDirectDisplayID {
-        let main = CGMainDisplayID()
-        if isReal(main) { return main }
-        return active().first(where: isReal) ?? active().first { !isGlasses($0) } ?? main
+    /// Every connected display, including ones mirroring another.
+    static func online() -> [CGDirectDisplayID] {
+        var count: UInt32 = 0
+        var ids = [CGDirectDisplayID](repeating: 0, count: 32)
+        CGGetOnlineDisplayList(UInt32(ids.count), &ids, &count)
+        return Array(ids.prefix(Int(count)))
     }
 
     static func active() -> [CGDirectDisplayID] {
@@ -78,7 +87,7 @@ final class MetalView: NSView {
     init(device: MTLDevice) {
         super.init(frame: .zero)
         metalLayer.device = device
-        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.pixelFormat = .bgra8Unorm_srgb
         metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         metalLayer.framebufferOnly = true
         metalLayer.displaySyncEnabled = true
@@ -116,8 +125,7 @@ final class MetalView: NSView {
     }
 }
 
-/// Full screen on the glasses, or an ordinary window on the main screen while
-/// they are not connected.
+/// Full screen on the glasses, hidden while they are not connected.
 @MainActor final class GlassesWindow {
     let view: MetalView
     private let window: NSWindow
@@ -141,29 +149,31 @@ final class MetalView: NSView {
         CGWindowID(window.windowNumber)
     }
 
+    /// Puts the window full screen on the glasses, taking the keyboard.
     func show() {
         place()
+        guard Displays.glassesScreen() != nil else { return }
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(view)
     }
 
-    /// Moves the window onto the glasses if they are connected.
+    func hide() {
+        window.orderOut(nil)
+    }
+
+    /// Moves the window onto the glasses, or out of sight when they are not
+    /// connected.
     func place() {
-        if let screen = Displays.glassesScreen() {
-            window.styleMask = [.borderless]
-            // Above the menu bar and Dock of that screen.
-            window.level = .statusBar
-            window.setFrame(screen.frame, display: true)
-            window.orderFrontRegardless()
-        } else {
-            window.styleMask = [.titled, .closable, .resizable]
-            window.level = .normal
-            if let screen = NSScreen.main, !screen.frame.intersects(window.frame) || window.frame.width > screen.frame.width {
-                window.setFrame(NSRect(x: 0, y: 0, width: 960, height: 540), display: true)
-                window.center()
-            }
+        guard let screen = Displays.glassesScreen() else {
+            hide()
+            return
         }
+        window.styleMask = [.borderless]
+        // Above the menu bar and Dock of that screen.
+        window.level = .statusBar
+        window.setFrame(screen.frame, display: true)
+        window.orderFrontRegardless()
         // Recreated so the link runs at the refresh rate of this screen.
-        displayLink.attach(to: view.metalLayer)
+        displayLink.attach(to: view.metalLayer, fps: screen.maximumFramesPerSecond)
     }
 }

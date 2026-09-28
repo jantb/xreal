@@ -4,11 +4,41 @@ import Foundation
 // Upper bound for any bias correction; real residual bias is far below this.
 let maxBias: Float = 0.1  // rad/s
 
-// Automatic learning only runs while the head is essentially still, and only
-// nudges the estimate slowly, so slow deliberate turns are not absorbed.
+// Glasses count as still after this long without turning faster than this.
 let autoMotionThreshold: Float = 0.02  // rad/s, relative to the current bias
 let autoStillSeconds: Float = 1.5
-let autoLearnTimeConstant: Float = 5.0  // seconds
+
+// Worn, the head is never that still. Stretches of this long without a
+// faster movement are averaged instead, and count unless their mean is a
+// steady slow turn.
+let calmWindowSeconds: Float = 4
+let calmMotionThreshold: Float = 0.08  // rad/s, relative to the current bias
+let calmMaxMeanRate: Float = 0.005  // rad/s, about 17°/min
+// Lying still, this long measures the bias well.
+let stillWindowSeconds: Float = 1
+// Standard deviation of each kind of bias measurement.
+let stillMeasurementDeviation: Float = 0.0005  // rad/s
+let calmMeasurementDeviation: Float = 0.002  // rad/s
+let calibrationMeasurementDeviation: Float = 0.0001  // rad/s
+// Learned bias is saved at most this often.
+let learnedSaveInterval: Float = 60  // seconds
+
+// Thermal model of the bias. MEMS gyro bias typically shifts by around
+// 0.0001 rad/s per °C, a few degrees per minute of yaw drift over the
+// glasses' warm-up.
+let referenceTemperature: Float = 35  // °C
+let maxBiasSlope: Float = 0.001  // rad/s per °C
+let initialBiasDeviation: Float = 0.005  // rad/s
+// A bias saved by an earlier run is already close; trusting it more keeps
+// the first measurements after a restart from throwing it off.
+let savedBiasDeviation: Float = 0.001  // rad/s
+let initialSlopeDeviation: Float = 0.0002  // rad/s per °C
+// How fast bias may wander beyond what temperature explains: variance
+// growth per second, from 0.0002 rad/s per √minute and 0.00002 rad/s/°C
+// per √hour.
+let biasWanderPerSecond: Float = 0.0002 * 0.0002 / 60
+let slopeWanderPerSecond: Float = 0.00002 * 0.00002 / 3600
+let temperatureTimeConstant: Float = 5  // seconds
 
 // Explicit calibration: the glasses must lie still for this long.
 let calibrationSeconds: Float = 2.0
@@ -23,8 +53,12 @@ let warmupDt: Float = 0.01
 
 // Longer gaps between IMU samples are skipped instead of integrated.
 let maxSampleGap: Float = 0.1  // seconds
-let rateTimeConstant: Float = 0.015  // seconds
+// Head rates are only lightly smoothed: prediction runs 30-40 ms ahead,
+// and any lag in the rate makes the view overshoot when a quick turn stops.
+let rateTimeConstant: Float = 0.004  // seconds
 let maxPredictionAge: Double = 0.05  // seconds
+// Prediction never moves the view further than this ahead of the pose.
+let maxPredictionAngle: Float = 0.14  // rad, about 8°
 
 // Learning from manual recenters: yaw drift between two recenters is
 // assumed to be leftover gyro bias about the vertical axis.
@@ -89,14 +123,25 @@ public struct TrackingSnapshot: Sendable {
     /// Monotonic time of the newest IMU sample, see `monotonicNow`.
     public var sampledAt: Double?
     public var sampleRateHz: Float = 0
+    /// Bias at the current temperature.
     public var gyroBias: SIMD3<Float>
+    /// The learned bias model, to save.
+    public var thermalBias: ThermalBias
+    /// IMU temperature, °C, when the glasses report it.
+    public var temperature: Float?
+    /// Counts bias measurements from still or calm stretches.
+    public var learnedWindows: UInt32 = 0
+    /// The connected glasses' display optics, when their calibration has
+    /// them.
+    public var display: DisplayCalibration?
     public var still = false
     public var calibration = CalibrationState.idle
     /// Increments whenever the bias changes by calibration or drift correction.
     public var biasRevision: UInt32 = 0
 
-    public init(gyroBias: SIMD3<Float>) {
+    public init(gyroBias: SIMD3<Float>, biasSlope: SIMD3<Float> = .zero) {
         self.gyroBias = gyroBias
+        thermalBias = ThermalBias(reference: gyroBias, slope: biasSlope)
     }
 
     /// Extrapolates the pose to `lead` seconds past `now`, covering the time
@@ -108,10 +153,11 @@ public struct TrackingSnapshot: Sendable {
             return pose
         }
         let horizon = Float(age + lead)
+        let ahead = { (rate: Float) in min(max(rate * horizon, -maxPredictionAngle), maxPredictionAngle) }
         return HeadPose(
-            yaw: wrapAngle(pose.yaw + yawRate * horizon),
-            pitch: pose.pitch + pitchRate * horizon,
-            roll: pose.roll + rollRate * horizon)
+            yaw: wrapAngle(pose.yaw + ahead(yawRate)),
+            pitch: pose.pitch + ahead(pitchRate),
+            roll: pose.roll + ahead(rollRate))
     }
 }
 
@@ -183,9 +229,11 @@ struct Fusion {
         dcm_imu_init(&dcm)
     }
 
-    /// `timestamp` is device time in microseconds.
+    /// `timestamp` is device time in microseconds, `temperature` the IMU's
+    /// in °C.
     mutating func push(
-        gyro: SIMD3<Float>, acc: SIMD3<Float>, timestamp: UInt64, bias: inout GyroBiasEstimator
+        gyro: SIMD3<Float>, acc: SIMD3<Float>, timestamp: UInt64, temperature: Float? = nil,
+        bias: inout GyroBiasEstimator
     ) -> FusionUpdate? {
         guard let lastTimestamp else {
             self.lastTimestamp = timestamp
@@ -203,7 +251,7 @@ struct Fusion {
             return nil
         }
 
-        let corrected = bias.correct(gyro: gyro, dt: dt)
+        let corrected = bias.correct(gyro: gyro, dt: dt, temperature: temperature)
         let angles = dcm_imu_update(
             &dcm, corrected.x, corrected.y, corrected.z, acc.x, acc.y, acc.z, dt)
 
@@ -222,7 +270,8 @@ struct Fusion {
 
         if let lastPose {
             let alpha = dt / (rateTimeConstant + dt)
-            let measuredYawRate = wrapAngle(pose.yaw - lastPose.yaw) / dt
+            // The gyro measures the turn rate directly.
+            let measuredYawRate = yawRateNow
             let measuredPitchRate = (pose.pitch - lastPose.pitch) / dt
             let measuredRollRate = (pose.roll - lastPose.roll) / dt
             yawRate += (measuredYawRate - yawRate) * alpha
@@ -235,15 +284,114 @@ struct Fusion {
     }
 }
 
+/// Gyro bias as a function of temperature, per axis:
+/// `reference + slope × (temperature − referenceTemperature)`.
+public struct ThermalBias: Equatable, Sendable {
+    /// Bias at `referenceTemperature`, rad/s.
+    public var reference: SIMD3<Float>
+    /// Change in bias per °C, rad/s.
+    public var slope: SIMD3<Float>
+
+    public init(reference: SIMD3<Float> = .zero, slope: SIMD3<Float> = .zero) {
+        self.reference = reference
+        self.slope = slope
+    }
+
+    public func bias(at temperature: Float?) -> SIMD3<Float> {
+        reference + slope * temperatureOffset(temperature)
+    }
+}
+
+func temperatureOffset(_ temperature: Float?) -> Float {
+    temperature.map { $0 - referenceTemperature } ?? 0
+}
+
+/// Tracks `ThermalBias` with a Kalman filter per axis. Each bias measurement
+/// is taken at some temperature, so measurements at different temperatures
+/// teach the slope, and the slope then keeps the bias right as the glasses
+/// warm up, between measurements.
+struct ThermalBiasFilter: Sendable {
+    private(set) var model: ThermalBias
+    // Covariance of (reference, slope), per axis.
+    private var p00: SIMD3<Float>
+    private var p01 = SIMD3<Float>.zero
+    private var p11: SIMD3<Float>
+
+    /// `deviation` is how far off `model.reference` may be, rad/s.
+    init(_ model: ThermalBias, deviation: Float = initialBiasDeviation) {
+        self.model = model
+        p00 = SIMD3(repeating: deviation * deviation)
+        p11 = SIMD3(repeating: initialSlopeDeviation * initialSlopeDeviation)
+        clamp()
+    }
+
+    /// Lets the bias wander a little over `dt` seconds, beyond what
+    /// temperature explains.
+    mutating func elapse(_ dt: Float) {
+        p00 += biasWanderPerSecond * dt
+        p11 += slopeWanderPerSecond * dt
+    }
+
+    /// Folds in a bias `measured` at `temperature`, with the given standard
+    /// deviation.
+    mutating func measure(_ measured: SIMD3<Float>, deviation: Float, temperature: Float?) {
+        let d = temperatureOffset(temperature)
+        let innovation = measured - model.bias(at: temperature)
+        let a = p00 + d * p01  // P·Hᵀ, first row
+        let b = p01 + d * p11  // P·Hᵀ, second row
+        let s = a + d * b + deviation * deviation
+        let gainReference = a / s
+        let gainSlope = b / s
+        model.reference += gainReference * innovation
+        model.slope += gainSlope * innovation
+        p00 -= gainReference * a
+        p01 -= gainReference * b
+        p11 -= gainSlope * b
+        clamp()
+    }
+
+    /// Moves the bias by `delta` at every temperature.
+    mutating func shift(by delta: SIMD3<Float>) {
+        model.reference += delta
+        clamp()
+    }
+
+    private mutating func clamp() {
+        model.reference = model.reference.clamped(
+            lowerBound: .init(repeating: -maxBias), upperBound: .init(repeating: maxBias))
+        model.slope = model.slope.clamped(
+            lowerBound: .init(repeating: -maxBiasSlope), upperBound: .init(repeating: maxBiasSlope))
+    }
+}
+
 /// Estimates the gyro's zero-rate offset. The DCM filter can only learn bias
 /// on axes that gravity makes observable; bias about the vertical axis would
-/// otherwise integrate straight into yaw drift.
+/// otherwise integrate straight into yaw drift. The offset shifts as the
+/// glasses warm up, so it is learned against the IMU's temperature.
 public struct GyroBiasEstimator: Sendable {
-    public private(set) var bias: SIMD3<Float>
+    private var filter: ThermalBiasFilter
+    /// Smoothed IMU temperature, °C; nil until the glasses report one.
+    public private(set) var temperature: Float?
     private var stillFor: Float = 0
+    private var window = Window()
+    private var sinceRevision: Float = 0
     private var calibration: Calibration?
     private var calibrationResult = CalibrationState.idle
     public private(set) var biasRevision: UInt32 = 0
+    /// Counts bias measurements taken from still or calm stretches.
+    public private(set) var learnedWindows: UInt32 = 0
+
+    /// Samples since the last measurement, while the head stayed calm.
+    private struct Window {
+        var elapsed: Float = 0
+        var sum = SIMD3<Double>.zero
+        var count: UInt32 = 0
+        var stillThroughout = true
+
+        var mean: SIMD3<Float> {
+            SIMD3<Float>(sum / Double(max(count, 1)))
+        }
+    }
 
     private struct Calibration {
         var elapsed: Float = 0
@@ -258,8 +406,22 @@ public struct GyroBiasEstimator: Sendable {
         }
     }
 
-    public init(bias: SIMD3<Float>) {
-        self.bias = bias.clamped(lowerBound: .init(repeating: -maxBias), upperBound: .init(repeating: maxBias))
+    /// `bias` and `slope` as saved by an earlier run, or zero for none.
+    public init(bias: SIMD3<Float>, slope: SIMD3<Float> = .zero) {
+        filter = ThermalBiasFilter(
+            ThermalBias(reference: bias, slope: slope),
+            deviation: bias == .zero ? initialBiasDeviation : savedBiasDeviation)
+    }
+
+    /// The bias at the current temperature, rad/s.
+    public var bias: SIMD3<Float> {
+        filter.model.bias(at: temperature)
+    }
+
+    /// The learned bias and how it changes with temperature, to keep
+    /// between runs.
+    public var thermalBias: ThermalBias {
+        filter.model
     }
 
     public var isStill: Bool {
@@ -280,12 +442,15 @@ public struct GyroBiasEstimator: Sendable {
     /// Adds `rate` (rad/s) of bias about the body-frame `up` axis, which is
     /// what shows up as yaw drift.
     public mutating func correctYawDrift(rate: Float, up: SIMD3<Float>) {
-        bias = clampBias(bias + rate * up)
+        filter.shift(by: rate * up)
         biasRevision += 1
     }
 
     /// Returns the bias-corrected gyro reading and updates the estimate.
-    public mutating func correct(gyro: SIMD3<Float>, dt: Float) -> SIMD3<Float> {
+    /// `temperature` is the IMU's, in °C, when the glasses report it.
+    public mutating func correct(gyro: SIMD3<Float>, dt: Float, temperature: Float? = nil) -> SIMD3<Float> {
+        updateTemperature(temperature, dt: dt)
+        filter.elapse(dt)
         let corrected = gyro - bias
         if calibration != nil {
             updateCalibration(gyro: gyro, dt: dt)
@@ -295,16 +460,52 @@ public struct GyroBiasEstimator: Sendable {
         return corrected
     }
 
-    private mutating func updateAuto(gyro: SIMD3<Float>, corrected: SIMD3<Float>, dt: Float) {
-        if magnitude(corrected) < autoMotionThreshold {
-            stillFor += dt
-        } else {
-            stillFor = 0
+    private mutating func updateTemperature(_ reading: Float?, dt: Float) {
+        guard let reading else { return }
+        guard let current = temperature else {
+            temperature = reading
+            return
         }
-        // While moving the estimate is held as-is.
-        if isStill {
-            let k = dt / autoLearnTimeConstant
-            bias = clampBias(bias + (gyro - bias) * k)
+        temperature = current + (reading - current) * dt / (temperatureTimeConstant + dt)
+    }
+
+    /// Learns from stretches without real head motion. Lying still, a
+    /// second of samples measures the bias well. Worn, the head is never
+    /// that still, but over a few calm seconds its small movements average
+    /// out and what is left is bias; those measurements count for less.
+    private mutating func updateAuto(gyro: SIMD3<Float>, corrected: SIMD3<Float>, dt: Float) {
+        let speed = magnitude(corrected)
+        stillFor = speed < autoMotionThreshold ? stillFor + dt : 0
+        sinceRevision += dt
+        if speed >= calmMotionThreshold {
+            window = Window()
+            return
+        }
+        window.elapsed += dt
+        window.sum += SIMD3<Double>(gyro)
+        window.count += 1
+        window.stillThroughout = window.stillThroughout && isStill
+
+        if window.stillThroughout && window.elapsed >= stillWindowSeconds {
+            learn(window.mean, deviation: stillMeasurementDeviation)
+        } else if window.elapsed >= calmWindowSeconds {
+            let mean = window.mean
+            // A steady slow turn would read as bias; leave it out.
+            if magnitude(mean - bias) < calmMaxMeanRate {
+                learn(mean, deviation: calmMeasurementDeviation)
+            } else {
+                window = Window()
+            }
+        }
+    }
+
+    private mutating func learn(_ measured: SIMD3<Float>, deviation: Float) {
+        filter.measure(measured, deviation: deviation, temperature: temperature)
+        window = Window()
+        learnedWindows += 1
+        if sinceRevision >= learnedSaveInterval {
+            biasRevision += 1
+            sinceRevision = 0
         }
     }
 
@@ -324,21 +525,20 @@ public struct GyroBiasEstimator: Sendable {
         calibration.mean += (SIMD3<Double>(gyro) - calibration.mean) / Double(calibration.count)
 
         if calibration.stillFor >= calibrationSeconds {
-            bias = clampBias(SIMD3<Float>(calibration.mean))
+            filter.measure(
+                SIMD3<Float>(calibration.mean), deviation: calibrationMeasurementDeviation,
+                temperature: temperature)
             self.calibration = nil
             calibrationResult = .succeeded
             biasRevision += 1
             stillFor = 0
+            window = Window()
         } else if calibration.elapsed >= calibrationTimeoutSeconds {
             self.calibration = nil
             calibrationResult = .failed
         } else {
             self.calibration = calibration
         }
-    }
-
-    private func clampBias(_ value: SIMD3<Float>) -> SIMD3<Float> {
-        value.clamped(lowerBound: .init(repeating: -maxBias), upperBound: .init(repeating: maxBias))
     }
 }
 

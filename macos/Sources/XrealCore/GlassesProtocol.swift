@@ -169,12 +169,22 @@ public struct ImuSample: Equatable, Sendable {
     public var gyroscope: SIMD3<Float>
     /// Device time in microseconds.
     public var timestamp: UInt64
+    /// The IMU chip's temperature in °C, nil when the reading is implausible.
+    public var temperature: Float? = nil
 }
+
+// The IMU reports its die temperature as a signed 16-bit count. The scale
+// is the TDK ICM-42688's (count / 132.48 + 25 °C); the drift model only
+// relies on it rising and falling with the real temperature.
+private let temperatureCountsPerDegree: Float = 132.48
+private let temperatureAtZeroCount: Float = 25
+private let plausibleTemperatures: ClosedRange<Float> = -20...100
 
 /// Decodes an IMU stream report (`01 02 ...`). Returns nil for other reports.
 func parseImuReport(_ bytes: [UInt8], biases: ImuBiases) -> ImuSample? {
     guard bytes.count >= 42, bytes[0] == 1, bytes[1] == 2 else { return nil }
-    // Bytes 2-3 hold a temperature reading that is not used.
+    let temperatureCount = Float(Int16(bitPattern: bytes.readUInt16(at: 2)))
+    let temperature = temperatureCount / temperatureCountsPerDegree + temperatureAtZeroCount
     let timestamp = bytes.readUInt64(at: 4) / 1000
 
     let gyroScale = Float(bytes.readUInt16(at: 12))
@@ -199,7 +209,9 @@ func parseImuReport(_ bytes: [UInt8], biases: ImuBiases) -> ImuSample? {
         accG.x * 9.81 + biases.accelerometer.x,
         accG.y * 9.81 + biases.accelerometer.z,
         accG.z * 9.81 + biases.accelerometer.y)
-    return ImuSample(accelerometer: accelerometer, gyroscope: gyro, timestamp: timestamp)
+    return ImuSample(
+        accelerometer: accelerometer, gyroscope: gyro, timestamp: timestamp,
+        temperature: plausibleTemperatures.contains(temperature) ? temperature : nil)
 }
 
 extension [UInt8] {

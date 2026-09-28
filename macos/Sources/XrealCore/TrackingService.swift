@@ -1,5 +1,10 @@
 import Foundation
 import Synchronization
+import os
+
+private let biasLog = Logger(subsystem: "dev.jantb.xreal.viewer", category: "bias")
+// How often the bias log records temperature and bias while connected.
+private let biasLogInterval = 30.0  // seconds
 
 private let readErrorsBeforeReconnect = 4
 
@@ -9,14 +14,25 @@ public final class Tracking: Sendable {
     private enum Command {
         case calibrate
         case correctYawDrift(Float)
+        /// Sets the latest `displayMode` on the glasses.
+        case applyDisplayMode
     }
 
     private let shared: Mutex<TrackingSnapshot>
     private let commands = Mutex<[Command]>([])
+    /// Set on the glasses whenever they connect.
+    private let displayMode: Mutex<DisplayMode>
+    /// Counts display modes set on the glasses, to wait for one.
+    private let modesApplied = Mutex<UInt64>(0)
 
-    public init(initialBias: SIMD3<Float>) {
-        shared = Mutex(TrackingSnapshot(gyroBias: initialBias))
-        let thread = Thread { [self] in run(initialBias: initialBias) }
+    /// `initialBias` is the gyro bias at the reference temperature and
+    /// `biasSlope` how it changes per °C, as saved by an earlier run.
+    public init(
+        initialBias: SIMD3<Float>, biasSlope: SIMD3<Float> = .zero, displayMode: DisplayMode = .highRefreshRate
+    ) {
+        shared = Mutex(TrackingSnapshot(gyroBias: initialBias, biasSlope: biasSlope))
+        self.displayMode = Mutex(displayMode)
+        let thread = Thread { [self] in run(initialBias: initialBias, biasSlope: biasSlope) }
         thread.name = "Glasses tracking"
         thread.qualityOfService = .userInteractive
         thread.start()
@@ -36,8 +52,32 @@ public final class Tracking: Sendable {
         commands.withLock { $0.append(.correctYawDrift(rate)) }
     }
 
-    private func run(initialBias: SIMD3<Float>) {
-        var bias = GyroBiasEstimator(bias: initialBias)
+    /// Switches the glasses to `mode`, now and whenever they reconnect.
+    public func setDisplayMode(_ mode: DisplayMode) {
+        let changed = displayMode.withLock { current in
+            defer { current = mode }
+            return current != mode
+        }
+        if changed {
+            commands.withLock { $0.append(.applyDisplayMode) }
+        }
+    }
+
+    /// Switches the glasses back to their own picture on both eyes and waits
+    /// up to `timeout` seconds for it, so they are not left side by side
+    /// once the viewer quits.
+    public func restoreDisplayMode(timeout: Double = 1) {
+        let before = modesApplied.withLock { $0 }
+        displayMode.withLock { $0 = .highRefreshRate }
+        commands.withLock { $0.append(.applyDisplayMode) }
+        let deadline = monotonicNow() + timeout
+        while monotonicNow() < deadline, modesApplied.withLock({ $0 }) == before {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+    }
+
+    private func run(initialBias: SIMD3<Float>, biasSlope: SIMD3<Float>) {
+        var bias = GyroBiasEstimator(bias: initialBias, slope: biasSlope)
         var session: UInt64 = 0
         var reportedMissing = false
 
@@ -55,12 +95,18 @@ public final class Tracking: Sendable {
                 continue
             }
             reportedMissing = false
+            let mode = displayMode.withLock { $0 }
             do {
-                try glasses.setDisplayMode(.highRefreshRate)
+                try glasses.setDisplayMode(mode)
             } catch {
-                eprint("Failed to set high refresh rate display mode: \(error)")
+                eprint("Failed to set display mode \(mode): \(error)")
             }
             eprint("Connected to \(glasses.name)")
+            let display = DisplayCalibration.parse(config: glasses.config)
+            if display == nil {
+                eprint("No display calibration on the glasses; using the nominal optics")
+            }
+            shared.withLock { $0.display = display }
 
             session += 1
             track(glasses, session: session, bias: &bias)
@@ -74,12 +120,21 @@ public final class Tracking: Sendable {
         var fusion = Fusion()
         var rate = SampleRate(now: monotonicNow())
         var readErrors = 0
+        var loggedAt = -Double.infinity
 
         while true {
             for command in commands.withLock({ pending in defer { pending = [] }; return pending }) {
                 switch command {
                 case .calibrate: bias.startCalibration()
                 case .correctYawDrift(let rate): bias.correctYawDrift(rate: rate, up: fusion.up)
+                case .applyDisplayMode:
+                    let mode = displayMode.withLock { $0 }
+                    do {
+                        try glasses.setDisplayMode(mode)
+                    } catch {
+                        eprint("Failed to set display mode \(mode): \(error)")
+                    }
+                    modesApplied.withLock { $0 += 1 }
                 }
             }
 
@@ -105,7 +160,7 @@ public final class Tracking: Sendable {
             guard
                 let update = fusion.push(
                     gyro: sample.gyroscope, acc: sample.accelerometer, timestamp: sample.timestamp,
-                    bias: &bias)
+                    temperature: sample.temperature, bias: &bias)
             else { continue }
             let now = monotonicNow()
             let sampleRateHz = rate.tick(now: now)
@@ -120,12 +175,39 @@ public final class Tracking: Sendable {
                 snapshot.sampledAt = now
                 snapshot.sampleRateHz = sampleRateHz
                 snapshot.gyroBias = bias.bias
+                snapshot.thermalBias = bias.thermalBias
+                snapshot.temperature = bias.temperature
+                snapshot.learnedWindows = bias.learnedWindows
                 snapshot.still = bias.isStill
                 snapshot.calibration = bias.calibrationState
                 snapshot.biasRevision = bias.biasRevision
             }
+            if now - loggedAt >= biasLogInterval {
+                loggedAt = now
+                logBias(bias, yaw: update.pose.yaw)
+            }
         }
     }
+}
+
+/// Records temperature, bias and yaw together, to tell drift that follows
+/// the glasses warming up from drift that follows head motion. Read with
+/// `log stream --predicate 'subsystem == "dev.jantb.xreal.viewer" AND category == "bias"'`.
+private func logBias(_ bias: GyroBiasEstimator, yaw: Float) {
+    let degreesPerMinute = { (rate: Float) in rate * 180 / .pi * 60 }
+    let current = bias.bias
+    let slope = bias.thermalBias.slope
+    let temperature = bias.temperature.map { String(format: "%.2f", $0) } ?? "-"
+    biasLog.notice(
+        """
+        temp \(temperature, privacy: .public) C  \
+        bias \(String(format: "%+.5f %+.5f %+.5f", current.x, current.y, current.z), privacy: .public) rad/s \
+        (\(String(format: "%+.2f", degreesPerMinute(current.y)), privacy: .public) deg/min about y)  \
+        slope \(String(format: "%+.6f %+.6f %+.6f", slope.x, slope.y, slope.z), privacy: .public) rad/s/C  \
+        learned \(bias.learnedWindows, privacy: .public)  \
+        still \(bias.isStill, privacy: .public)  \
+        yaw \(String(format: "%+.3f", yaw), privacy: .public)
+        """)
 }
 
 /// Writes a line to stderr, like Rust's `eprintln!`.

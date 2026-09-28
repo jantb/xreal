@@ -77,6 +77,90 @@ func turningAboutTheVerticalChangesYawByTheTurnedAngle(tilt: Float) throws {
     #expect(abs(turned - 0.5) < 0.01, "tilt \(tilt): turned \(turned) rad")
 }
 
+/// Head motion of someone sitting and reading: small nods and turns that
+/// come back to where they started every `period` seconds.
+private func calmHead(at time: Float, period: Float = 2) -> SIMD3<Float> {
+    let phase = 2 * Float.pi * time / period
+    return SIMD3(0.03 * sin(phase), 0.04 * cos(phase), 0.02 * sin(2 * phase))
+}
+
+@Test func wornGlassesLearnTheBiasFromCalmHeadMotion() {
+    let offset = SIMD3<Float>(0.001, 0.004, -0.002)
+    var fusion = Fusion()
+    var bias = GyroBiasEstimator(bias: .zero)
+    var t: UInt64 = 1_000
+    func yaw(after seconds: Float, from start: Int) -> Float {
+        var yaw: Float = 0
+        for i in start..<start + Int(seconds / dt) {
+            t += UInt64(dt * 1_000_000)
+            let gyro = calmHead(at: Float(i) * dt) + offset
+            if let update = fusion.push(gyro: gyro, acc: gravityYUp, timestamp: t, bias: &bias) {
+                yaw = update.pose.yaw
+            }
+        }
+        return yaw
+    }
+
+    // Two minutes of wearing them; the head never holds still.
+    _ = yaw(after: 120, from: 0)
+    let before = yaw(after: 0.001, from: 120_000)
+    // A whole number of periods later the head is back where it was.
+    let after = yaw(after: 60, from: 120_001)
+
+    // Unlearned, 0.004 rad/s would drift 0.24 rad in the minute.
+    let drift = abs(wrapAngle(after - before))
+    #expect(drift < 0.03, "yaw drifted \(drift) rad in a minute")
+}
+
+@Test func steadySlowPanIsNotLearnedAsBias() {
+    var bias = GyroBiasEstimator(bias: .zero)
+    // Slowly panning across a wide screen, calm but always one way.
+    for i in 0..<Int(30 / dt) {
+        _ = bias.correct(gyro: calmHead(at: Float(i) * dt) + SIMD3(0, 0.02, 0), dt: dt)
+    }
+    #expect(abs(bias.bias.y) < 0.001, "\(bias.bias)")
+}
+
+@Test func biasFollowsTheGlassesAsTheyWarmUp() {
+    // Bias that grows with temperature, as a MEMS gyro's does.
+    let slope = SIMD3<Float>(0.00005, 0.0001, -0.00008)
+    let biasAt20 = SIMD3<Float>(0.002, -0.001, 0.003)
+    let trueBias = { (temperature: Float) in biasAt20 + slope * (temperature - 20) }
+    var bias = GyroBiasEstimator(bias: .zero)
+
+    // Warming from 20 to 35 °C over 15 minutes, lying still now and then,
+    // as when put down between uses.
+    let warmUp = Int(15 * 60 / dt)
+    for i in 0..<warmUp {
+        let temperature = 20 + 15 * Float(i) / Float(warmUp)
+        let lyingStill = (i / Int(60 / dt)) % 3 == 0
+        let motion = lyingStill ? SIMD3<Float>.zero : SIMD3(0.4, i % 2 == 0 ? 0.6 : -0.6, 0.2)
+        _ = bias.correct(gyro: trueBias(temperature) + motion, dt: dt, temperature: temperature)
+    }
+    // Then worn and moving the whole time, no chance to measure, while the
+    // glasses warm on to 45 °C.
+    for i in 0..<Int(10 * 60 / dt) {
+        let temperature = 35 + 10 * Float(i) * dt / 600
+        let motion = SIMD3<Float>(0.4, i % 2 == 0 ? 0.6 : -0.6, 0.2)
+        _ = bias.correct(gyro: trueBias(temperature) + motion, dt: dt, temperature: temperature)
+    }
+
+    // Holding on to the last measured bias would be 0.001 rad/s off about y.
+    let error = bias.bias - trueBias(45)
+    #expect(abs(error.y) < 0.0004, "bias off by \(error) at 45 °C")
+}
+
+@Test func learnedThermalBiasSurvivesARestart() {
+    var bias = GyroBiasEstimator(bias: .zero)
+    for i in 0..<Int(10 / dt) {
+        let temperature: Float = i < Int(5 / dt) ? 25 : 40
+        _ = bias.correct(gyro: SIMD3(0, 0.001 + 0.0001 * (temperature - 25), 0), dt: dt, temperature: temperature)
+    }
+    let saved = bias.thermalBias
+    let restarted = GyroBiasEstimator(bias: saved.reference, slope: saved.slope)
+    #expect(restarted.thermalBias == saved)
+}
+
 @Test func slowHeadTurnIsNotLearnedAsBias() {
     var bias = GyroBiasEstimator(bias: .zero)
     for _ in 0..<Int(20 / dt) {
@@ -159,8 +243,8 @@ func turningAboutTheVerticalChangesYawByTheTurnedAngle(tilt: Float) throws {
     var fusion = Fusion()
     var bias = GyroBiasEstimator(bias: .zero)
     var t: UInt64 = 1_000
-    // Keep moving slightly so automatic learning stays out of the way.
-    let gyro = { (i: Int) in SIMD3<Float>(i % 2 == 0 ? 0.05 : -0.05, residual, 0) }
+    // Keep nodding briskly so automatic learning stays out of the way.
+    let gyro = { (i: Int) in SIMD3<Float>(i % 2 == 0 ? 0.3 : -0.3, residual, 0) }
 
     func yawOver(_ fusion: inout Fusion, _ bias: inout GyroBiasEstimator, _ t: inout UInt64) -> Float {
         var first: Float?
@@ -227,4 +311,51 @@ func turningAboutTheVerticalChangesYawByTheTurnedAngle(tilt: Float) throws {
 
     #expect(abs((tilted.roll - level.roll) - tilt) < 0.02, "roll \(tilted.roll - level.roll)")
     #expect(abs(tilted.pitch - level.pitch) < 0.02)
+}
+
+@Test func predictionDoesNotOvershootWhenAQuickTurnStops() {
+    var fusion = Fusion()
+    var bias = GyroBiasEstimator(bias: .zero)
+    var t: UInt64 = 1_000
+    var snapshot = TrackingSnapshot(gyroBias: .zero)
+    snapshot.status = .connected
+    func run(rate: Float, seconds: Float) {
+        for _ in 0..<Int(seconds / dt) {
+            t += 1_000
+            if let update = fusion.push(gyro: SIMD3(0, rate, 0), acc: gravityYUp, timestamp: t, bias: &bias) {
+                snapshot.pose = update.pose
+                (snapshot.yawRate, snapshot.pitchRate, snapshot.rollRate) =
+                    (update.yawRate, update.pitchRate, update.rollRate)
+            }
+        }
+    }
+    // A quick glance to the side at about 170°/s, then a sudden stop.
+    run(rate: 0, seconds: 0.5)
+    run(rate: 3, seconds: 0.3)
+    run(rate: 0, seconds: 0.015)
+    let stoppedAt = snapshot.pose.yaw
+    snapshot.sampledAt = 10
+    // Predicting as far ahead as frames take to reach the glasses.
+    let predicted = snapshot.predict(now: 10, lead: 0.04)
+    #expect(abs(wrapAngle(predicted.yaw - stoppedAt)) < 0.02, "overshoot \(predicted.yaw - stoppedAt) rad")
+}
+
+@Test func predictionIsCappedForImplausiblyFastRates() {
+    var snapshot = TrackingSnapshot(gyroBias: .zero)
+    snapshot.status = .connected
+    snapshot.yawRate = 50
+    snapshot.sampledAt = 5
+    let predicted = snapshot.predict(now: 5, lead: 0.04)
+    #expect(abs(predicted.yaw) <= 0.15)
+}
+
+@Test func aSavedBiasIsNotThrownOffByTheFirstCalmStretchAfterARestart() {
+    let saved = SIMD3<Float>(-0.004, 0.0008, 0.0045)
+    var bias = GyroBiasEstimator(bias: saved)
+    // One calm stretch, worn, whose average picks up a slow drift of the
+    // head as well as the bias.
+    for i in 0..<Int(4.5 / dt) {
+        _ = bias.correct(gyro: saved + SIMD3(0, 0.004, 0) + calmHead(at: Float(i) * dt), dt: dt)
+    }
+    #expect(abs(bias.bias.y - saved.y) < 0.002, "bias moved to \(bias.bias)")
 }

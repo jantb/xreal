@@ -12,9 +12,11 @@ import XrealCore
 
     var displayID: CGDirectDisplayID { display.displayID }
 
-    /// `index` tells several screens apart. Returns nil if the WindowServer
+    /// `index` tells screens apart, such as the canvas and the ones
+    /// `--probe-sizes` creates. `refreshRate` matches the glasses, so macOS
+    /// draws the screen in step with them. Returns nil if the WindowServer
     /// refuses to create the display.
-    init?(index: Int, width: Int, height: Int) {
+    init?(index: Int, width: Int, height: Int, refreshRate: Double = 90) {
         // Much larger displays crash the WindowServer, logging the user out.
         guard (1...maxVirtualScreenSide).contains(width), (1...maxVirtualScreenSide).contains(height) else {
             return nil
@@ -38,7 +40,7 @@ import XrealCore
         guard let display = CGVirtualDisplay(descriptor: descriptor) else { return nil }
         let settings = CGVirtualDisplaySettings()
         settings.hiDPI = 0
-        settings.modes = [CGVirtualDisplayMode(width: UInt(width), height: UInt(height), refreshRate: 120)]
+        settings.modes = [CGVirtualDisplayMode(width: UInt(width), height: UInt(height), refreshRate: refreshRate)]
         guard display.apply(settings) else { return nil }
 
         self.display = display

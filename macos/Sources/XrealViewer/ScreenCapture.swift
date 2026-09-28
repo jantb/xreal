@@ -152,7 +152,7 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
 
         var backing: CVMetalTexture?
         CVMetalTextureCacheCreateTextureFromImage(
-            nil, textureCache, pixelBuffer, nil, .bgra8Unorm, CVPixelBufferGetWidth(pixelBuffer),
+            nil, textureCache, pixelBuffer, nil, .bgra8Unorm_srgb, CVPixelBufferGetWidth(pixelBuffer),
             CVPixelBufferGetHeight(pixelBuffer), 0, &backing)
         guard let backing, let texture = CVMetalTextureGetTexture(backing) else { return }
         latest.publish(CapturedFrame(texture: texture, backing: backing))

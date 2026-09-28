@@ -102,3 +102,17 @@ private func writeInt24(_ value: Int32, into bytes: inout [UInt8], at offset: In
 @Test func nonImuReportsAreIgnored() {
     #expect(parseImuReport([UInt8](repeating: 0, count: 64), biases: ImuBiases()) == nil)
 }
+
+@Test func imuReportCarriesTheChipTemperature() throws {
+    func temperature(count: Int16) -> Float? {
+        var report = [UInt8](repeating: 0, count: 64)
+        report[0] = 1
+        report[1] = 2
+        report.write(UInt16(bitPattern: count), at: 2)
+        return parseImuReport(report, biases: ImuBiases())?.temperature
+    }
+    let cool = try #require(temperature(count: 0))
+    let warm = try #require(temperature(count: 1_300))
+    #expect(warm > cool)
+    #expect(temperature(count: .min) == nil, "a reading far outside any real temperature is dropped")
+}

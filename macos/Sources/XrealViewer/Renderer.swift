@@ -7,84 +7,21 @@ private let shaderSource = """
     #include <metal_stdlib>
     using namespace metal;
 
-    struct VertexOut {
-        float4 position [[position]];
-        float2 uv;
-        float2 ndc;
-    };
-
-    // One triangle covering the screen. `p` runs from 0 to 2, so its visible
-    // part maps output (0,0)-(1,1) onto the viewport `rect` (x, y, w, h) in
-    // normalized source coordinates.
-    vertex VertexOut viewportVertex(uint id [[vertex_id]], constant float4 &rect [[buffer(0)]]) {
-        float2 p = float2((id << 1) & 2, id & 2);
-        VertexOut out;
-        out.ndc = float2(p.x * 2 - 1, 1 - p.y * 2);
-        out.position = float4(out.ndc, 0, 1);
-        out.uv = rect.xy + p * rect.zw;
-        return out;
-    }
-
-    static float4 sampleOrBlack(texture2d<float> source, sampler linear, float2 uv) {
-        if (any(uv < 0) || any(uv > 1)) {
-            return float4(0, 0, 0, 1);
-        }
-        return float4(source.sample(linear, uv).rgb, 1);
-    }
-
-    fragment float4 cropFragment(VertexOut in [[stage_in]],
-                                 texture2d<float> source [[texture(0)]],
-                                 sampler linear [[sampler(0)]]) {
-        return sampleOrBlack(source, linear, in.uv);
-    }
-
-    // Mirrors `SpatialView.sourcePoint(atOutput:)`.
-    struct Spatial {
-        float4 rotation0, rotation1, rotation2;
-        float4 fovScreen;         // tan half fov xy, screen size zw
-        float4 sourcePan;         // source size xy, pan zw
-        float4 pivotScaleCurved;  // pivot xy, scale, curved
-    };
-
-    fragment float4 spatialFragment(VertexOut in [[stage_in]],
-                                    constant Spatial &u [[buffer(0)]],
-                                    texture2d<float> source [[texture(0)]],
-                                    sampler linear [[sampler(0)]]) {
-        float3x3 rotation = float3x3(u.rotation0.xyz, u.rotation1.xyz, u.rotation2.xyz);
-        float3 room = rotation * float3(in.ndc * u.fovScreen.xy, -1);
-        float2 onScreen;
-        if (u.pivotScaleCurved.w > 0.5) {
-            float distance = length(room.xz);
-            if (distance < 1e-6) {
-                return float4(0, 0, 0, 1);
-            }
-            onScreen = float2(atan2(room.x, -room.z), room.y / distance);
-        } else {
-            if (room.z > -1e-6) {
-                return float4(0, 0, 0, 1);
-            }
-            onScreen = room.xy / -room.z;
-        }
-        float2 unit = float2(onScreen.x / u.fovScreen.z + 0.5, 0.5 - onScreen.y / u.fovScreen.w);
-        float2 pixel = unit * u.sourcePan.xy + u.sourcePan.zw;
-        float2 pivot = u.pivotScaleCurved.xy;
-        pixel = pivot + (pixel - pivot) / u.pivotScaleCurved.z;
-        return sampleOrBlack(source, linear, pixel / u.sourcePan.xy);
-    }
-
-    // One capture of a virtual screen hanging in the room: the part of the
-    // screen from span.x to span.y (-1 to 1 across), flat or curved.
+    // One capture of the canvas hanging in the room: the part of it from
+    // span.x to span.y (-1 to 1 across), flat or curved.
     struct Panel {
         float4x4 viewProjection;
+        float4x4 scanEndViewProjection;  // as seen when the bottom row lights up
         float4 center, right, up;  // room coordinates; half extents
         float4 shape;              // x: half arc (0 flat), yz: span, w: segments
-        float4 outline;            // x: 1 to outline the screen
+        float4 outline;            // x: 1 to outline the canvas
+        float4 spin0, spin1, spin2;  // turns the upright screen to its tilt
     };
 
     struct PanelOut {
         float4 position [[position]];
         float2 uv;        // in the capture
-        float2 screenUV;  // in the whole screen, for the outline
+        float2 screenUV;  // in the whole canvas, for the outline
     };
 
     // Mirrors `ScreenSurface.point(at:)`.
@@ -95,15 +32,24 @@ private let shaderSource = """
         float y = (id & 1) ? -1 : 1;
         float3 room;
         if (panel.shape.x > 0) {
-            float angle = x * panel.shape.x;
-            float radius = length(panel.center.xyz);
-            room = cos(angle) * panel.center.xyz + sin(angle) * radius * normalize(panel.right.xyz)
+            // Curved: the row's arc plus the straight column.
+            float rowRadius = length(panel.right.xyz) / panel.shape.x;
+            float3 ahead = normalize(float3(panel.center.x, 0, panel.center.z));
+            float across = x * panel.shape.x;
+            room = panel.center.xyz + rowRadius * (sin(across) * normalize(panel.right.xyz) - (1 - cos(across)) * ahead)
                 + y * panel.up.xyz;
         } else {
             room = panel.center.xyz + x * panel.right.xyz + y * panel.up.xyz;
         }
+        room = float3x3(panel.spin0.xyz, panel.spin1.xyz, panel.spin2.xyz) * room;
         PanelOut out;
-        out.position = panel.viewProjection * float4(room, 1);
+        // The glasses light their rows top to bottom; each vertex is placed
+        // as seen when its row lights up. The shift across the view is
+        // about linear in height, so the vertices of a strip suffice.
+        float4 top = panel.viewProjection * float4(room, 1);
+        float4 bottom = panel.scanEndViewProjection * float4(room, 1);
+        float row = top.w > 1e-4 ? 0.5 - 0.5 * top.y / top.w : 0;
+        out.position = mix(top, bottom, row);
         out.uv = float2(t, 0.5 - y * 0.5);
         out.screenUV = float2(x * 0.5 + 0.5, 0.5 - y * 0.5);
         return out;
@@ -121,14 +67,17 @@ private let shaderSource = """
             // About three glasses pixels wide, however far away the screen is.
             float2 fromEdge = min(in.screenUV, 1 - in.screenUV) / edgeWidth;
             if (min(fromEdge.x, fromEdge.y) < 3) {
-                return float4(0.35, 0.75, 1, 1);
+                // Light blue, in linear light.
+                return float4(0.1, 0.52, 1, 1);
             }
         }
-        // A screen pushed away covers several source pixels per glasses
-        // pixel; averaging four samples across that keeps text from
-        // shimmering.
+        // A canvas pushed even slightly away covers more than one source
+        // pixel per glasses pixel, so some source pixels would fall between
+        // glasses pixels and pop in and out as the head moves. Averaging
+        // four samples across the footprint blends them in instead. At one
+        // to one a single sample stays sharpest.
         float2 size = float2(source.get_width(), source.get_height());
-        if (max(length(dx * size), length(dy * size)) < 1.25) {
+        if (max(length(dx * size), length(dy * size)) < 1.02) {
             return float4(source.sample(linear, in.uv).rgb, 1);
         }
         float3 sum = source.sample(linear, in.uv + 0.25 * (dx + dy)).rgb
@@ -139,25 +88,25 @@ private let shaderSource = """
     }
     """
 
-// Clip distances for the room's depth range, in room units (1 is where a
-// screen shows at the glasses' pixel density).
+// Clip distances for the room's depth range, in room units (1 is where the
+// canvas shows at the glasses' pixel density).
 private let nearClip: Float = 0.05
 private let farClip: Float = 100
-// A curved screen is drawn as flat strips about this wide.
+// A curved canvas is drawn as flat strips about this wide.
 private let curveSegmentAngle: Float = 0.02  // rad, about 1°
 
 enum RendererError: Error {
     case noMetalDevice
 }
 
-/// Draws the latest captured frame as seen through the viewport. The frame
-/// stays on the GPU the whole way: the captured IOSurface is sampled
-/// directly. Used from the render thread only, apart from `device`.
+/// Draws the canvas's latest captured frames as each eye sees them. The
+/// frames stay on the GPU the whole way: the captured IOSurfaces are sampled
+/// directly. Both the captures and the drawable are sRGB, so filtering
+/// blends in linear light and thin text keeps its weight wherever it lands.
+/// Used from the render thread only, apart from `device`.
 final class Renderer: @unchecked Sendable {
     let device: MTLDevice
     private let queue: MTLCommandQueue
-    private let cropPipeline: MTLRenderPipelineState
-    private let spatialPipeline: MTLRenderPipelineState
     private let panelPipeline: MTLRenderPipelineState
     private let depthState: MTLDepthStencilState
     private let sampler: MTLSamplerState
@@ -172,20 +121,10 @@ final class Renderer: @unchecked Sendable {
         self.queue = queue
 
         let library = try device.makeLibrary(source: shaderSource, options: nil)
-        func pipeline(fragment: String) throws -> MTLRenderPipelineState {
-            let descriptor = MTLRenderPipelineDescriptor()
-            descriptor.vertexFunction = library.makeFunction(name: "viewportVertex")
-            descriptor.fragmentFunction = library.makeFunction(name: fragment)
-            descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-            return try device.makeRenderPipelineState(descriptor: descriptor)
-        }
-        cropPipeline = try pipeline(fragment: "cropFragment")
-        spatialPipeline = try pipeline(fragment: "spatialFragment")
-
         let panelDescriptor = MTLRenderPipelineDescriptor()
         panelDescriptor.vertexFunction = library.makeFunction(name: "panelVertex")
         panelDescriptor.fragmentFunction = library.makeFunction(name: "panelFragment")
-        panelDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        panelDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
         panelDescriptor.depthAttachmentPixelFormat = .depth32Float
         panelPipeline = try device.makeRenderPipelineState(descriptor: panelDescriptor)
         let depthDescriptor = MTLDepthStencilDescriptor()
@@ -207,103 +146,100 @@ final class Renderer: @unchecked Sendable {
         self.sampler = sampler
     }
 
-    /// Draws `geometry` from `frames`, one per captured display: the crop and
-    /// spatial views show the first, the room shows each panel's own. Clears
-    /// to black when there is nothing to show yet.
-    func draw(to drawable: CAMetalDrawable, frames: [CapturedFrame?], geometry: ViewGeometry?) {
+    /// Draws `room` from `frames`, one per capture of the canvas, as one
+    /// view per eye side by side. Clears to black when there is nothing to
+    /// show.
+    func draw(to drawable: CAMetalDrawable, frames: [CapturedFrame?], room: RoomView?) {
         guard let commandBuffer = queue.makeCommandBuffer() else { return }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         pass.colorAttachments[0].storeAction = .store
-        if case .room = geometry {
-            pass.depthAttachment.texture = depthTexture(matching: drawable.texture)
-            pass.depthAttachment.loadAction = .clear
-            pass.depthAttachment.clearDepth = 1
-            pass.depthAttachment.storeAction = .dontCare
-        }
+        pass.depthAttachment.texture = depthTexture(matching: drawable.texture)
+        pass.depthAttachment.loadAction = .clear
+        pass.depthAttachment.clearDepth = 1
+        pass.depthAttachment.storeAction = .dontCare
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
         encoder.setFragmentSamplerState(sampler, index: 0)
 
-        switch geometry {
-        case nil:
-            break
-        case .crop(let crop):
-            if let frame = frames.first ?? nil {
-                let width = Float(frame.width)
-                let height = Float(frame.height)
-                var rect = SIMD4(crop.x / width, crop.y / height, crop.width / width, crop.height / height)
-                encoder.setRenderPipelineState(cropPipeline)
-                encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
-                encoder.setFragmentTexture(frame.texture, index: 0)
-                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            }
-        case .spatial(let view):
-            if let frame = frames.first ?? nil {
-                var rect = SIMD4<Float>(0, 0, 1, 1)
-                var uniforms = [
-                    SIMD4(view.rotation.columns.0, 0),
-                    SIMD4(view.rotation.columns.1, 0),
-                    SIMD4(view.rotation.columns.2, 0),
-                    SIMD4(lowHalf: view.tanHalfFov, highHalf: view.screenSize),
-                    SIMD4(lowHalf: view.sourceSize, highHalf: view.pan),
-                    SIMD4(lowHalf: view.pivot, highHalf: SIMD2(view.scale, view.curved ? 1 : 0)),
-                ]
-                encoder.setRenderPipelineState(spatialPipeline)
-                encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
-                encoder.setFragmentBytes(
-                    &uniforms, length: MemoryLayout<SIMD4<Float>>.stride * uniforms.count, index: 0)
-                encoder.setFragmentTexture(frame.texture, index: 0)
-                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            }
-        case .room(let room):
+        if let room {
             encoder.setRenderPipelineState(panelPipeline)
             encoder.setDepthStencilState(depthState)
-            let viewProjection = Self.viewProjection(room)
-            for panel in room.panels {
-                guard panel.source < frames.count, let frame = frames[panel.source] else { continue }
-                let surface = panel.surface
-                let arc = surface.halfArc * (panel.span.y - panel.span.x)
-                let segments = surface.halfArc > 0 ? max(Int((arc / curveSegmentAngle).rounded(.up)), 1) : 1
-                var uniforms = PanelUniforms(
-                    viewProjection: viewProjection, center: SIMD4(surface.center, 1), right: SIMD4(surface.right, 0),
-                    up: SIMD4(surface.up, 0),
-                    shape: SIMD4(surface.halfArc, panel.span.x, panel.span.y, Float(segments)),
-                    outline: SIMD4(panel.highlighted ? 1 : 0, 0, 0, 0))
-                encoder.setVertexBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
-                encoder.setFragmentBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
-                encoder.setFragmentTexture(frame.texture, index: 0)
-                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 2 * (segments + 1))
+            // One view per eye, side by side, each from where that eye is.
+            let width = Double(drawable.texture.width) / Double(max(room.eyes.count, 1))
+            let height = Double(drawable.texture.height)
+            for (index, eye) in room.eyes.enumerated() {
+                encoder.setViewport(
+                    MTLViewport(originX: width * Double(index), originY: 0, width: width, height: height, znear: 0, zfar: 1))
+                let viewProjection = Self.viewProjection(eye, headRotation: room.headRotation)
+                let scanEnd = room.scanEndRotation.map { Self.viewProjection(eye, headRotation: $0) }
+                drawPanels(
+                    of: room, viewProjection: viewProjection, scanEndViewProjection: scanEnd ?? viewProjection,
+                    frames: frames, encoder: encoder)
             }
         }
         encoder.endEncoding()
         // The capture surfaces must not be recycled while the GPU still reads them.
-        commandBuffer.addCompletedHandler { _ in withExtendedLifetime(frames) {} }
+        commandBuffer.addCompletedHandler { buffer in
+            withExtendedLifetime(frames) {}
+        }
         commandBuffer.present(drawable)
         commandBuffer.commit()
     }
 
+    private func drawPanels(
+        of room: RoomView, viewProjection: simd_float4x4, scanEndViewProjection: simd_float4x4,
+        frames: [CapturedFrame?], encoder: MTLRenderCommandEncoder
+    ) {
+        for panel in room.panels {
+            guard panel.source < frames.count, let frame = frames[panel.source] else { continue }
+            let surface = panel.surface
+            let arc = surface.halfArc * (panel.span.y - panel.span.x)
+            let segments = surface.halfArc > 0 ? max(Int((arc / curveSegmentAngle).rounded(.up)), 1) : 1
+            let spin = simd_float3x3(surface.spin)
+            var uniforms = PanelUniforms(
+                viewProjection: viewProjection, scanEndViewProjection: scanEndViewProjection, center: SIMD4(surface.center, 1), right: SIMD4(surface.right, 0),
+                up: SIMD4(surface.up, 0),
+                shape: SIMD4(surface.halfArc, panel.span.x, panel.span.y, Float(segments)),
+                outline: SIMD4(panel.highlighted ? 1 : 0, 0, 0, 0),
+                spin0: SIMD4(spin.columns.0, 0), spin1: SIMD4(spin.columns.1, 0), spin2: SIMD4(spin.columns.2, 0))
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
+            encoder.setFragmentTexture(frame.texture, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 2 * (segments + 1))
+        }
+    }
+
     private struct PanelUniforms {
         var viewProjection: simd_float4x4
+        var scanEndViewProjection: simd_float4x4
         var center: SIMD4<Float>
         var right: SIMD4<Float>
         var up: SIMD4<Float>
         var shape: SIMD4<Float>
         var outline: SIMD4<Float>
+        var spin0: SIMD4<Float>
+        var spin1: SIMD4<Float>
+        var spin2: SIMD4<Float>
     }
 
-    /// Room coordinates to clip space: into the head frame, then a
-    /// perspective projection over the view's field of view with depth
-    /// from 0 at `nearClip` to 1 at `farClip`.
-    private static func viewProjection(_ room: RoomView) -> simd_float4x4 {
-        let r = room.headRotation.transpose
-        let view = simd_float4x4(
-            SIMD4(r.columns.0, 0), SIMD4(r.columns.1, 0), SIMD4(r.columns.2, 0), SIMD4(0, 0, 0, 1))
+    /// Room coordinates to clip space for `eye`: into the head frame, then
+    /// into the eye's own frame, from where it sits and as it is turned, then
+    /// the eye's projection from its calibrated focal length and optical
+    /// centre, with depth from 0 at `nearClip` to 1 at `farClip`.
+    private static func viewProjection(_ eye: EyeOptics, headRotation: simd_float3x3) -> simd_float4x4 {
+        let r = eye.rotation.transpose * headRotation.transpose
+        let t = -(eye.rotation.transpose * eye.position)
+        let view = simd_float4x4(SIMD4(r.columns.0, 0), SIMD4(r.columns.1, 0), SIMD4(r.columns.2, 0), SIMD4(t, 1))
         let depthScale = farClip / (nearClip - farClip)
+        // Pixels run right and down from the top-left corner; clip space
+        // runs right and up from the middle.
+        let scale = 2 * eye.focal / eye.size
+        let offset = SIMD2(1 - 2 * eye.center.x / eye.size.x, 2 * eye.center.y / eye.size.y - 1)
         let projection = simd_float4x4(
-            SIMD4(1 / room.tanHalfFov.x, 0, 0, 0), SIMD4(0, 1 / room.tanHalfFov.y, 0, 0),
-            SIMD4(0, 0, depthScale, -1), SIMD4(0, 0, nearClip * depthScale, 0))
+            SIMD4(scale.x, 0, 0, 0), SIMD4(0, scale.y, 0, 0),
+            SIMD4(offset.x, offset.y, depthScale, -1), SIMD4(0, 0, nearClip * depthScale, 0))
         return projection * view
     }
 
