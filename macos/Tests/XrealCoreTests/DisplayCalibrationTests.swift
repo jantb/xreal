@@ -4,9 +4,6 @@ import simd
 
 @testable import XrealCore
 
-/// The display section of an Air 2's factory calibration.
-private let air2Calibration = Data(#"{"display": {"resolution": [1920.0, 1080.0], "k_left_display": [2705.48, 0.0, 964.67, 0.0, 2701.73, 571.591, 0.0, 0.0, 1.0], "k_right_display": [2709.87, 0.0, 949.94, 0.0, 2696.04, 549.238, 0.0, 0.0, 1.0], "target_p_left_display": [-0.0592447, 0.0187027, -0.0192912], "target_p_right_display": [0.00436358, 0.0186026, -0.0196755], "target_q_left_display": [-0.00915112, 0.00835657, 0.00262477, 0.99992], "target_q_right_display": [-0.00542599, -0.00240477, 0.00336847, 0.999977]}}"#.utf8)
-
 private let calibrated = DisplayCalibration.parse(config: air2Calibration)
 
 /// Where a point `metres` straight ahead lands in each eye.
@@ -50,4 +47,31 @@ private func pixels(_ calibration: DisplayCalibration, metres: Float) throws -> 
     for json in ["{}", #"{"display": {"resolution": [1920, 1080]}}"#, "not json"] {
         #expect(DisplayCalibration.parse(config: Data(json.utf8)) == nil, "\(json)")
     }
+}
+
+@Test func theLensMapsBackToTheDisplayPixelsItWasCalibratedAt() throws {
+    let calibration = try #require(calibrated)
+    let root = try #require(try JSONSerialization.jsonObject(with: air2Calibration) as? [String: Any])
+    let lenses = try #require(root["display_distortion"] as? [String: Any])
+    for (name, eye) in [("left_display", calibration.left), ("right_display", calibration.right)] {
+        let lens = try #require(eye.distortion, "\(name) has no distortion")
+        let grid = try #require((lenses[name] as? [String: Any])?["data"] as? [NSNumber]).map(\.floatValue)
+        // Each calibrated display pixel, and where the lens shows it.
+        for index in stride(from: 0, to: grid.count / 4, by: 7) {
+            let display = SIMD2(grid[index * 4], grid[index * 4 + 1])
+            let shown = SIMD2(grid[index * 4 + 2], grid[index * 4 + 3])
+            let found = lens.displayPixel(showing: shown)
+            #expect(simd_distance(found, display) < 0.3, "\(name): \(shown) should come from \(display), got \(found)")
+        }
+    }
+}
+
+@Test func throughTheLensTheCornersArePulledInAndTheMiddleBarelyMoves() throws {
+    let lens = try #require(calibrated?.left.distortion)
+    let middle = SIMD2<Float>(960, 540)
+    #expect(simd_distance(lens.displayPixel(showing: middle), middle) < 2)
+    // What should appear at the display's corner is drawn further in, as
+    // the lens magnifies the edges.
+    let corner = lens.displayPixel(showing: SIMD2(0, 0))
+    #expect(corner.x > 5 && corner.y > 5, "corner drawn at \(corner)")
 }

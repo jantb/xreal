@@ -182,6 +182,9 @@ private final class ActionItem: NSMenuItem {
                                 }
                             }),
                     ActionItem("Swap Eyes", checked: settings.swapEyes) { [viewer] in viewer.perform(.toggleSwapEyes) },
+                    ActionItem("Correct Lens Distortion", checked: settings.lensCorrection) { [viewer] in
+                        viewer.perform(.toggleLensCorrection)
+                    },
                 ]))
         menu.addItem(
             ActionItem("Zoom Out to Show Cursor", checked: settings.followCursor) { [viewer] in

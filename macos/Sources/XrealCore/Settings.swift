@@ -28,6 +28,9 @@ public struct Settings: Equatable, Sendable {
     /// Shows the left eye's view to the right eye and the other way round,
     /// for glasses that take the side-by-side halves the other way.
     public var swapEyes = false
+    /// Draws each eye through its lens's calibrated distortion, so straight
+    /// edges stay straight to the corners of the view.
+    public var lensCorrection = true
     /// How many metres a room unit is: the canvas at distance 1 is this far
     /// away. Nearer shows more depth between its parts.
     public var metresPerRoomUnit: Float = 1
@@ -78,6 +81,7 @@ public struct Settings: Equatable, Sendable {
             case "follow_roll": parse(value, into: &settings.followRoll)
             case "follow_cursor": parse(value, into: &settings.followCursor)
             case "swap_eyes": parse(value, into: &settings.swapEyes)
+            case "lens_correction": parse(value, into: &settings.lensCorrection)
             case "metres_per_room_unit":
                 if let metres = Float(value), metres.isFinite, metres > 0 {
                     settings.metresPerRoomUnit = min(max(metres, 0.25), 20)
@@ -110,6 +114,7 @@ public struct Settings: Equatable, Sendable {
             "follow_cursor=\(followCursor)",
             "curve_radius=\(curveRadius)",
             "swap_eyes=\(swapEyes)",
+            "lens_correction=\(lensCorrection)",
             "metres_per_room_unit=\(metresPerRoomUnit)",
         ]
         return lines.map { $0 + "\n" }.joined()

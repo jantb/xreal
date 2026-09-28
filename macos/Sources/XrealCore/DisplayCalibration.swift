@@ -15,16 +15,19 @@ public struct EyeOptics: Equatable, Sendable {
     /// Where the eye is, from the middle between the two eyes. In metres as
     /// calibrated; the room scales it to room units.
     public var position: SIMD3<Float>
+    /// How the display's lens moves its pixels; nil to draw straight.
+    public var distortion: LensDistortion?
 
     public init(
         focal: SIMD2<Float>, center: SIMD2<Float>, size: SIMD2<Float>, rotation: simd_float3x3,
-        position: SIMD3<Float>
+        position: SIMD3<Float>, distortion: LensDistortion? = nil
     ) {
         self.focal = focal
         self.center = center
         self.size = size
         self.rotation = rotation
         self.position = position
+        self.distortion = distortion
     }
 
     /// Where `point`, in the head frame, lands on the display, in its
@@ -33,6 +36,12 @@ public struct EyeOptics: Equatable, Sendable {
         let seen = rotation.transpose * (point - position)
         guard seen.z < -1e-6 else { return nil }
         return SIMD2(center.x + focal.x * seen.x / -seen.z, center.y - focal.y * seen.y / -seen.z)
+    }
+
+    /// The display pixel that shows `point` through the lens: `pixel(of:)`
+    /// moved by the lens's distortion. The renderer does the same.
+    public func displayPixel(of point: SIMD3<Float>) -> SIMD2<Float>? {
+        pixel(of: point).map { distortion?.displayPixel(showing: $0) ?? $0 }
     }
 }
 
@@ -95,15 +104,27 @@ public struct DisplayCalibration: Equatable, Sendable {
         let middle = (SIMD3(leftP[0], leftP[1], leftP[2]) + SIMD3(rightP[0], rightP[1], rightP[2])) / 2
         let cameraToHead = simd_float3x3(diagonal: SIMD3(1, -1, -1))
         let size = SIMD2(resolution[0], resolution[1])
-        func eye(k: [Float], turn: simd_quatf, position: [Float]) -> EyeOptics {
+        // Each lens's distortion, when the calibration has it; without it
+        // the eye is drawn straight.
+        let lenses = root["display_distortion"] as? [String: Any]
+        func distortion(_ name: String) -> LensDistortion? {
+            guard let lens = lenses?[name] as? [String: Any], (lens["type"] as? NSNumber)?.intValue == 1,
+                let columns = (lens["num_col"] as? NSNumber)?.intValue, let rows = (lens["num_row"] as? NSNumber)?.intValue,
+                let data = numbers(lens["data"], count: columns * rows * 4)
+            else { return nil }
+            return LensDistortion(grid: data, gridColumns: columns, gridRows: rows, size: size)
+        }
+        func eye(k: [Float], turn: simd_quatf, position: [Float], lens: String) -> EyeOptics {
             let relative = simd_float3x3(together.inverse * turn)
             let offset = simd_float3x3(together.inverse) * (SIMD3(position[0], position[1], position[2]) - middle)
             return EyeOptics(
                 focal: SIMD2(k[0], k[4]), center: SIMD2(k[2], k[5]), size: size,
-                rotation: cameraToHead * relative * cameraToHead, position: cameraToHead * offset)
+                rotation: cameraToHead * relative * cameraToHead, position: cameraToHead * offset,
+                distortion: distortion(lens))
         }
         let calibration = DisplayCalibration(
-            left: eye(k: leftK, turn: leftTurn, position: leftP), right: eye(k: rightK, turn: rightTurn, position: rightP))
+            left: eye(k: leftK, turn: leftTurn, position: leftP, lens: "left_display"),
+            right: eye(k: rightK, turn: rightTurn, position: rightP, lens: "right_display"))
         // A calibration this far off is not one to draw with.
         let separation = calibration.right.position.x - calibration.left.position.x
         guard (0.04...0.09).contains(separation), size.x > 0, size.y > 0,

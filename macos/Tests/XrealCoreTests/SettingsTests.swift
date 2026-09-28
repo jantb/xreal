@@ -125,3 +125,10 @@ import simd
     settings.metresPerRoomUnit = 20
     #expect(Settings.parse(settings.serialize()).metresPerRoomUnit == 20)
 }
+
+@Test func lensCorrectionIsOnUntilTurnedOffAndStaysOff() {
+    #expect(Settings.parse("").lensCorrection)
+    var settings = Settings()
+    settings.lensCorrection = false
+    #expect(!Settings.parse(settings.serialize()).lensCorrection)
+}

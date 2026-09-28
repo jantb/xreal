@@ -14,8 +14,10 @@ private let shaderSource = """
         float4x4 scanEndViewProjection;  // as seen when the bottom row lights up
         float4 center, right, up;  // room coordinates; half extents
         float4 shape;              // x: half arc (0 flat), yz: span, w: segments
-        float4 outline;            // x: 1 to outline the canvas
+        float4 outline;            // x: 1 to outline the canvas; y: rows it is drawn in
         float4 spin0, spin1, spin2;  // turns the upright screen to its tilt
+        float4 lens;               // xy: where the lens lookup starts, z: its step, w: 1 to use it
+        float4 lensGrid;           // xy: the lookup's columns and rows, zw: the eye's size in pixels
     };
 
     struct PanelOut {
@@ -24,12 +26,16 @@ private let shaderSource = """
         float2 screenUV;  // in the whole canvas, for the outline
     };
 
-    // Mirrors `ScreenSurface.point(at:)`.
-    vertex PanelOut panelVertex(uint id [[vertex_id]], constant Panel &panel [[buffer(0)]]) {
-        // Triangle strip down the columns: top, bottom, next top, ...
+    // Mirrors `ScreenSurface.point(at:)` and `EyeOptics.displayPixel(of:)`.
+    vertex PanelOut panelVertex(uint id [[vertex_id]], uint band [[instance_id]],
+                                constant Panel &panel [[buffer(0)]],
+                                texture2d<float> lens [[texture(0)]],
+                                sampler linear [[sampler(0)]]) {
+        // One triangle strip per row of the canvas, across its columns:
+        // top, bottom, next top, ...
         float t = float(id >> 1) / panel.shape.w;
         float x = mix(panel.shape.y, panel.shape.z, t);
-        float y = (id & 1) ? -1 : 1;
+        float y = 1 - 2 * float(band + (id & 1)) / panel.outline.y;
         float3 room;
         if (panel.shape.x > 0) {
             // Curved: the row's arc plus the straight column.
@@ -50,6 +56,17 @@ private let shaderSource = """
         float4 bottom = panel.scanEndViewProjection * float4(room, 1);
         float row = top.w > 1e-4 ? 0.5 - 0.5 * top.y / top.w : 0;
         out.position = mix(top, bottom, row);
+        if (panel.lens.w > 0.5 && out.position.w > 1e-4) {
+            // Drawn where the lens shows it: from the pixel it would be at
+            // without the lens, looked up in the lens's offsets.
+            float2 size = panel.lensGrid.zw;
+            float2 ndc = out.position.xy / out.position.w;
+            float2 pixel = float2(ndc.x + 1, 1 - ndc.y) * 0.5 * size;
+            float2 cell = (pixel - panel.lens.xy) / panel.lens.z + 0.5;
+            pixel += lens.sample(linear, cell / panel.lensGrid.xy, level(0)).xy;
+            ndc = float2(pixel.x / size.x * 2 - 1, 1 - pixel.y / size.y * 2);
+            out.position.xy = ndc * out.position.w;
+        }
         out.uv = float2(t, 0.5 - y * 0.5);
         out.screenUV = float2(x * 0.5 + 0.5, 0.5 - y * 0.5);
         return out;
@@ -92,8 +109,11 @@ private let shaderSource = """
 // canvas shows at the glasses' pixel density).
 private let nearClip: Float = 0.05
 private let farClip: Float = 100
-// A curved canvas is drawn as flat strips about this wide.
+// The canvas is drawn as flat pieces about this wide and this tall, as seen
+// from the viewer, so the lens correction and each row's timing bend it
+// smoothly and a curved canvas looks round.
 private let curveSegmentAngle: Float = 0.02  // rad, about 1°
+private let rowAngle: Float = 0.03  // rad, about 1.7°
 
 enum RendererError: Error {
     case noMetalDevice
@@ -112,6 +132,11 @@ final class Renderer: @unchecked Sendable {
     private let sampler: MTLSamplerState
     // Matches the drawable size; recreated when that changes.
     private var depthTexture: MTLTexture?
+    // Each eye's lens offsets, for the vertex shader, and the distortion
+    // they were made from.
+    private var lensTextures: [(distortion: LensDistortion, texture: MTLTexture)?] = []
+    // Stands in for the lens offsets when an eye is drawn straight.
+    private let noLens: MTLTexture
 
     init() throws {
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
@@ -144,6 +169,18 @@ final class Renderer: @unchecked Sendable {
             throw RendererError.noMetalDevice
         }
         self.sampler = sampler
+
+        let noLensDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rg16Float, width: 1, height: 1, mipmapped: false)
+        noLensDescriptor.usage = .shaderRead
+        guard let noLens = device.makeTexture(descriptor: noLensDescriptor) else {
+            throw RendererError.noMetalDevice
+        }
+        let zero: [Float16] = [0, 0]
+        zero.withUnsafeBytes { bytes in
+            noLens.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: bytes.baseAddress!, bytesPerRow: 4)
+        }
+        self.noLens = noLens
     }
 
     /// Draws `room` from `frames`, one per capture of the canvas, as one
@@ -169,13 +206,15 @@ final class Renderer: @unchecked Sendable {
             // One view per eye, side by side, each from where that eye is.
             let width = Double(drawable.texture.width) / Double(max(room.eyes.count, 1))
             let height = Double(drawable.texture.height)
+            encoder.setVertexSamplerState(sampler, index: 0)
             for (index, eye) in room.eyes.enumerated() {
                 encoder.setViewport(
                     MTLViewport(originX: width * Double(index), originY: 0, width: width, height: height, znear: 0, zfar: 1))
+                encoder.setVertexTexture(lensTexture(for: eye.distortion, eye: index) ?? noLens, index: 0)
                 let viewProjection = Self.viewProjection(eye, headRotation: room.headRotation)
                 let scanEnd = room.scanEndRotation.map { Self.viewProjection(eye, headRotation: $0) }
                 drawPanels(
-                    of: room, viewProjection: viewProjection, scanEndViewProjection: scanEnd ?? viewProjection,
+                    of: room, eye: eye, viewProjection: viewProjection, scanEndViewProjection: scanEnd ?? viewProjection,
                     frames: frames, encoder: encoder)
             }
         }
@@ -189,25 +228,36 @@ final class Renderer: @unchecked Sendable {
     }
 
     private func drawPanels(
-        of room: RoomView, viewProjection: simd_float4x4, scanEndViewProjection: simd_float4x4,
+        of room: RoomView, eye: EyeOptics, viewProjection: simd_float4x4, scanEndViewProjection: simd_float4x4,
         frames: [CapturedFrame?], encoder: MTLRenderCommandEncoder
     ) {
+        let lens = eye.distortion.map { SIMD4<Float>($0.origin.x, $0.origin.y, $0.step, 1) } ?? .zero
+        let lensGrid = SIMD4(
+            Float(eye.distortion?.columns ?? 1), Float(eye.distortion?.rows ?? 1), eye.size.x, eye.size.y)
         for panel in room.panels {
             guard panel.source < frames.count, let frame = frames[panel.source] else { continue }
             let surface = panel.surface
-            let arc = surface.halfArc * (panel.span.y - panel.span.x)
-            let segments = surface.halfArc > 0 ? max(Int((arc / curveSegmentAngle).rounded(.up)), 1) : 1
+            // How wide and tall the piece looks, roughly, from its distance.
+            let distance = max(length(surface.center), 1e-3)
+            let arc =
+                surface.halfArc > 0
+                ? surface.halfArc * (panel.span.y - panel.span.x)
+                : length(surface.right) * (panel.span.y - panel.span.x) / distance
+            let segments = max(Int((arc / curveSegmentAngle).rounded(.up)), 1)
+            let rows = max(Int((2 * length(surface.up) / distance / rowAngle).rounded(.up)), 1)
             let spin = simd_float3x3(surface.spin)
             var uniforms = PanelUniforms(
                 viewProjection: viewProjection, scanEndViewProjection: scanEndViewProjection, center: SIMD4(surface.center, 1), right: SIMD4(surface.right, 0),
                 up: SIMD4(surface.up, 0),
                 shape: SIMD4(surface.halfArc, panel.span.x, panel.span.y, Float(segments)),
-                outline: SIMD4(panel.highlighted ? 1 : 0, 0, 0, 0),
-                spin0: SIMD4(spin.columns.0, 0), spin1: SIMD4(spin.columns.1, 0), spin2: SIMD4(spin.columns.2, 0))
+                outline: SIMD4(panel.highlighted ? 1 : 0, Float(rows), 0, 0),
+                spin0: SIMD4(spin.columns.0, 0), spin1: SIMD4(spin.columns.1, 0), spin2: SIMD4(spin.columns.2, 0),
+                lens: lens, lensGrid: lensGrid)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
             encoder.setFragmentTexture(frame.texture, index: 0)
-            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 2 * (segments + 1))
+            encoder.drawPrimitives(
+                type: .triangleStrip, vertexStart: 0, vertexCount: 2 * (segments + 1), instanceCount: rows)
         }
     }
 
@@ -222,6 +272,43 @@ final class Renderer: @unchecked Sendable {
         var spin0: SIMD4<Float>
         var spin1: SIMD4<Float>
         var spin2: SIMD4<Float>
+        var lens: SIMD4<Float>
+        var lensGrid: SIMD4<Float>
+    }
+
+    /// `distortion`'s offsets as a texture the vertex shader looks up in,
+    /// made again only when the eye's distortion changes; nil to draw the
+    /// eye straight.
+    private func lensTexture(for distortion: LensDistortion?, eye: Int) -> MTLTexture? {
+        guard let distortion else { return nil }
+        while lensTextures.count <= eye {
+            lensTextures.append(nil)
+        }
+        if let cached = lensTextures[eye], cached.distortion == distortion {
+            return cached.texture
+        }
+        // Offsets from each lookup point to the display pixel that shows
+        // it: a few pixels at most, so half floats keep them to a hundredth
+        // of a pixel.
+        var offsets: [Float16] = []
+        offsets.reserveCapacity(distortion.displayPixels.count * 2)
+        for (index, display) in distortion.displayPixels.enumerated() {
+            let point = SIMD2(Float(index % distortion.columns), Float(index / distortion.columns))
+            let offset = display - (distortion.origin + point * distortion.step)
+            offsets.append(Float16(offset.x))
+            offsets.append(Float16(offset.y))
+        }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rg16Float, width: distortion.columns, height: distortion.rows, mipmapped: false)
+        descriptor.usage = .shaderRead
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+        offsets.withUnsafeBytes { bytes in
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, distortion.columns, distortion.rows), mipmapLevel: 0,
+                withBytes: bytes.baseAddress!, bytesPerRow: distortion.columns * 4)
+        }
+        lensTextures[eye] = (distortion, texture)
+        return texture
     }
 
     /// Room coordinates to clip space for `eye`: into the head frame, then

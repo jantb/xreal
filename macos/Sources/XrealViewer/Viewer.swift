@@ -76,6 +76,7 @@ enum ViewerCommand {
     case toggleStatus
     case setCurveRadius(Float)
     case toggleSwapEyes
+    case toggleLensCorrection
     case setDepthScale(Float)
     case calibrate
     case toggleCurved
@@ -259,6 +260,9 @@ struct ViewerState: Sendable {
             var eye = eye
             eye.position /= settings.metresPerRoomUnit
             eye.focal *= scale
+            if !settings.lensCorrection {
+                eye.distortion = nil
+            }
             return eye
         }
         if settings.swapEyes {
@@ -506,6 +510,7 @@ final class FrameLoop: @unchecked Sendable {
             case .toggleFollowCursor: state.settings.followCursor.toggle()
             case .toggleStatus: state.settings.overlayVisible.toggle()
             case .toggleSwapEyes: state.settings.swapEyes.toggle()
+            case .toggleLensCorrection: state.settings.lensCorrection.toggle()
             case .setDepthScale(let metres): state.settings.metresPerRoomUnit = metres
             case .setCurveRadius(let radius): state.settings.curveRadius = radius
             case .calibrate:
