@@ -118,6 +118,7 @@ enum ViewerCommand {
     case toggleSpherical
     case toggleEvenTextSize
     case toggleSoftEdges
+    case toggleSteadyLaptopScreen
     /// How far a wrapped canvas bends up and down, 0 to 1.
     case setVerticalWrap(Float)
     /// Picks up (true) or lets go of (false) the canvas, if looked at.
@@ -577,6 +578,7 @@ final class FrameLoop: @unchecked Sendable {
     /// The window being pinned and its size in points.
     private var pinnedTarget: (id: CGWindowID, size: CGSize)?
     private var pinnedTask: Task<Void, Never>?
+    private let laptopScreen = LaptopScreen()
 
     init(settings: Settings) throws {
         // The viewer needs the glasses as a display of their own.
@@ -653,9 +655,18 @@ final class FrameLoop: @unchecked Sendable {
         shared.mutex.withLock { ($0.hudInfo(now: monotonicNow()), $0.source) }
     }
 
-    /// Leaves the glasses showing their own picture, as before the viewer ran.
+    /// Leaves the glasses showing their own picture, and the laptop's
+    /// screen its own refresh rate, as before the viewer ran.
     func restoreGlasses() {
         tracking.restoreDisplayMode()
+        laptopScreen.release()
+    }
+
+    /// Holds the laptop's screen at 60 Hz while the glasses are in use, if
+    /// asked to.
+    private func holdLaptopScreen() {
+        let steady = shared.mutex.withLock { $0.settings.steadyLaptopScreen }
+        laptopScreen.hold(steady: steady && Displays.glassesDisplay() != nil)
     }
 
     func saveSettings() {
@@ -707,6 +718,7 @@ final class FrameLoop: @unchecked Sendable {
             case .toggleSpherical: state.settings.canvas.spherical.toggle()
             case .toggleEvenTextSize: state.settings.canvas.evenSize.toggle()
             case .toggleSoftEdges: state.settings.softEdges.toggle()
+            case .toggleSteadyLaptopScreen: state.settings.steadyLaptopScreen.toggle()
             case .setVerticalWrap(let wrap): state.settings.canvas.verticalWrap = min(max(wrap, 0), 1)
             case .grab(let pickUp):
                 // Saved once it is let go.
@@ -754,6 +766,7 @@ final class FrameLoop: @unchecked Sendable {
         }
         switch command {
         case .toggleStatusStrip: updateDashboard()
+        case .toggleSteadyLaptopScreen: holdLaptopScreen()
         case .toggleLivePointer: updatePointer()
         default: break
         }
@@ -794,6 +807,9 @@ final class FrameLoop: @unchecked Sendable {
                 eprint("A real display came or went")
                 arrangeCanvas()
             }
+            // The laptop's screen comes back in its own mode when the lid
+            // opens.
+            holdLaptopScreen()
         }
     }
 
@@ -982,9 +998,11 @@ final class FrameLoop: @unchecked Sendable {
             canvasScreen = nil
             setSource(.noGlasses, captures: [])
             window.hide()
+            holdLaptopScreen()
             return
         }
         window.show()
+        holdLaptopScreen()
         // For measuring the glasses' output on its own: no canvas, no
         // captures, only black frames, still timed.
         if ProcessInfo.processInfo.environment["XREAL_NO_CANVAS"] != nil {

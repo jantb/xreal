@@ -69,6 +69,9 @@ public struct Settings: Equatable, Sendable {
     /// Fades the last few pixels of the canvas and what hangs above it, so
     /// they end softly against the room.
     public var softEdges = true
+    /// Holds the Mac's own screen at 60 Hz while the glasses are in use, as
+    /// its ProMotion rate makes the glasses drop frames.
+    public var steadyLaptopScreen = true
     /// How often macOS draws the canvas; one of `canvasRefreshRates`.
     public var canvasRefreshRate = 90
     /// Takes the head pose as late before each frame as the frame's work
@@ -147,6 +150,7 @@ public struct Settings: Equatable, Sendable {
             case "late_pose_sampling": parse(value, into: &settings.latePoseSampling)
             case "sharp_filtering": parse(value, into: &settings.sharpFiltering)
             case "soft_edges": parse(value, into: &settings.softEdges)
+            case "steady_laptop_screen": parse(value, into: &settings.steadyLaptopScreen)
             case "even_text_size":
                 var even = true
                 parse(value, into: &even)
@@ -205,6 +209,7 @@ public struct Settings: Equatable, Sendable {
             "late_pose_sampling=\(latePoseSampling)",
             "sharp_filtering=\(sharpFiltering)",
             "soft_edges=\(softEdges)",
+            "steady_laptop_screen=\(steadyLaptopScreen)",
             "live_pointer=\(livePointer)",
             "status_strip=\(statusStrip)",
         ] + (pinnedWindow.map { ["pinned_window=\($0.bundleID)|\($0.title.filter { !$0.isNewline })"] } ?? [])

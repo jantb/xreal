@@ -341,6 +341,15 @@ private struct ViewSection: View {
             Toggle("Zoom Out to Show Cursor", isOn: model.toggle(\.settings.followCursor, .toggleFollowCursor))
             Toggle("Sharpen Text", isOn: model.toggle(\.settings.sharpFiltering, .toggleSharpFiltering))
             Toggle("Soft Edges", isOn: model.toggle(\.settings.softEdges, .toggleSoftEdges))
+            VStack(alignment: .leading) {
+                Toggle(
+                    "Laptop Screen at 60 Hz While Wearing the Glasses",
+                    isOn: model.toggle(\.settings.steadyLaptopScreen, .toggleSteadyLaptopScreen))
+                Text(
+                    "Alongside the canvas, the laptop's screen makes the glasses drop frames every few seconds; at 60 Hz about half as often, and with the lid closed not at all. Its own rate comes back when the glasses are unplugged, this is turned off or the viewer quits, and after a crash at the next start."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
             Toggle("Correct Lens Distortion", isOn: model.toggle(\.settings.lensCorrection, .toggleLensCorrection))
         }
     }

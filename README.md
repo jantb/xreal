@@ -81,7 +81,10 @@ On an M4 Pro with macOS 27 the glasses drop about two frames a second in bursts
 that repeat every 5.055 s (455 of their refreshes). It comes with the canvas's
 virtual display: with none there are no drops, with it uncaptured about half,
 and neither the canvas's size, rate or place nor the viewer's own settings
-and thread priorities change the period. Environment switches, for measuring:
+and thread priorities change the period. It also needs the Mac's own screen
+on: with the lid closed there are none. The viewer holds that screen at 60 Hz
+while the glasses are in use, which halves them, and gives it back its own
+rate afterwards. Environment switches, for measuring:
 `XREAL_NO_CANVAS=1` (glasses only), `XREAL_NO_CAPTURE=1` (canvas, not
 captured), `XREAL_NO_REALTIME=1`, `XREAL_FRAME_LATENCY=2` (a frame more slack),
 as in `open --env XREAL_NO_CANVAS=1 "/Applications/XREAL Viewer.app"`.
