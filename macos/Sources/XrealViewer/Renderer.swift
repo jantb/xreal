@@ -44,14 +44,13 @@ private let shaderSource = """
         // How far towards the viewer the row at this height has come.
         float inward = panel.rect.z * (y + 1) * length(panel.up.xyz);
         if (panel.shape.x > 0 && panel.rect.w > 0) {
-            // Wrapped: the column's arc sets the row's height and circle,
-            // and the row is widened as its circle shrinks, so its pixels
-            // keep their size.
+            // Wrapped: the column's arc, spaced as a Mercator map, sets the
+            // row's height and circle, so pixels keep their shape.
             float rowRadius = length(panel.right.xyz) / panel.shape.x;
             float columnRadius = rowRadius / panel.rect.w;
-            float rise = y * length(panel.up.xyz) / columnRadius;
+            float rise = atan(sinh(y * length(panel.up.xyz) / columnRadius));
             float ring = rowRadius - columnRadius * (1 - cos(rise));
-            float across = x * panel.shape.x * rowRadius / ring;
+            float across = x * panel.shape.x;
             float3 level = sin(across) * normalize(panel.right.xyz) + cos(across) * ahead;
             room = panel.center.xyz - rowRadius * ahead + ring * level + columnRadius * sin(rise) * normalize(panel.up.xyz);
         } else if (panel.shape.x > 0) {
@@ -323,11 +322,9 @@ final class Renderer: @unchecked Sendable {
             let rect = panel.rect
             // How wide and tall the piece looks, roughly, from its distance.
             let distance = max(length(surface.center), 1e-3)
-            // Rows widened on a wrapped surface need more pieces.
-            let widening = max(surface.rowWidening(at: rect.top), surface.rowWidening(at: rect.bottom))
             let arc =
                 surface.halfArc > 0
-                ? surface.halfArc * (rect.right - rect.left) * widening
+                ? surface.halfArc * (rect.right - rect.left)
                 : length(surface.right) * (rect.right - rect.left) / distance
             let segments = max(Int((arc / curveSegmentAngle).rounded(.up)), 1)
             let rows = max(Int((length(surface.up) * (rect.top - rect.bottom) / distance / rowAngle).rounded(.up)), 1)

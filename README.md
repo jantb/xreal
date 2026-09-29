@@ -48,12 +48,13 @@ Global shortcuts (⌃⌥⌘ plus a key):
 | M | Move the pointer to where you look |
 
 The canvas can be flat, curved round you like a monitor, or wrapped round
-you as part of a sphere (**Wrap Around You**), where every pixel faces you and
-keeps its size; **Wrap Up and Down** blends from the curved shape to the full
+you as part of a sphere (**Wrap Around You**), where every pixel is the same
+distance away, faces you and keeps its shape, a little smaller towards the top
+and bottom; **Wrap Up and Down** blends from the curved shape to the full
 sphere.
 
-Above the canvas, where you see it by looking up, hangs a row on a sphere
-round your eyes, so every pixel of it faces you: a dashboard updated ten times a second (time and thermal state, CPU per
+Above the canvas, where you see it by looking up, hangs a row tilted to face
+you: a dashboard updated ten times a second (time and thermal state, CPU per
 core, memory, GPU, network, disk space and traffic, power draw, battery, the
 busiest apps, the glasses and latency), and beside it, if you pick one in the
 controls, a pinned window from any app. The pinned window can stay anywhere,

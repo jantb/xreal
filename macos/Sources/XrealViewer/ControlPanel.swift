@@ -262,7 +262,7 @@ private struct CanvasSection: View {
                             get: { settings.canvas.verticalWrap }, set: { model.perform(.setVerticalWrap($0)) }),
                         in: 0...1)
                     Text(
-                        "At 100% the canvas is part of a ball round you: every pixel faces you and keeps its size. Less bends it less up and down."
+                        "At 100% the canvas is part of a ball round you: every pixel faces you and keeps its shape, a little smaller towards the top and bottom. Less bends it less up and down."
                     )
                     .font(.caption).foregroundStyle(.secondary)
                 }

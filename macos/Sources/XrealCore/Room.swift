@@ -139,8 +139,10 @@ public struct ScreenSurface: Equatable, Sendable {
     /// How far a curved screen's columns curve too, from 0, straight, to 1,
     /// round the same middle as its rows: then it is part of a sphere, and
     /// every pixel faces the viewer when that middle is at the eyes. Rows
-    /// away from the middle are widened to keep every pixel the same size.
-    /// `up` is then measured along the curve.
+    /// are spaced out as on a Mercator map, so every pixel keeps its shape
+    /// and columns stay straight wherever they are seen from; pixels away
+    /// from the middle row are only a little smaller. `up` is then measured
+    /// along the middle column as that map lays it out.
     public var wrap: Float
 
     public init(
@@ -178,8 +180,7 @@ public struct ScreenSurface: Equatable, Sendable {
         }
         if wrap > 0 {
             let row = wrappedRow(position.y)
-            // Widened as its circle shrinks, so its pixels keep their size.
-            let across = position.x * halfArc * rowRadius / row.radius
+            let across = position.x * halfArc
             let level = sin(across) * normalize(right) + cos(across) * horizontalAhead
             return sphereMiddle + row.radius * level + row.height * normalize(up)
         }
@@ -198,27 +199,13 @@ public struct ScreenSurface: Equatable, Sendable {
 
     /// For a wrapped screen, the row at `y`, from -1 at the bottom to 1 at
     /// the top: the radius of its circle and how far above the middle it
-    /// is, round its column's arc of radius `rowRadius / wrap`.
+    /// is, round its column's arc of radius `rowRadius / wrap`. The rows'
+    /// angles up that arc are a Mercator map's, whose rows crowd towards
+    /// the poles just as their circles shrink.
     private func wrappedRow(_ y: Float) -> (radius: Float, height: Float) {
         let columnRadius = rowRadius / wrap
-        let rise = y * length(up) / columnRadius
+        let rise = mercatorRise(y * length(up) / columnRadius)
         return (rowRadius - columnRadius * (1 - cos(rise)), columnRadius * sin(rise))
-    }
-
-    /// How much wider than the middle row the row at `y` is drawn round its
-    /// circle, to keep its pixels their size: 1 but on a wrapped screen.
-    public func rowWidening(at y: Float) -> Float {
-        wrap > 0 && halfArc > 0 ? rowRadius / max(wrappedRow(y).radius, 1e-4) : 1
-    }
-
-    /// Whether the surface carried on up to `y` stays clear of folding over
-    /// itself: on a wrapped screen, short of the pole and of rows wrapping
-    /// all the way round.
-    public func staysOpen(upTo y: Float) -> Bool {
-        guard wrap > 0, halfArc > 0 else { return true }
-        let row = wrappedRow(y)
-        return y * length(up) * wrap / rowRadius < 1.45 && row.radius > 0.2 * rowRadius
-            && halfArc * rowRadius / row.radius < 0.95 * .pi
     }
 
     /// Level unit vector towards the middle of the screen.
@@ -248,7 +235,7 @@ public struct ScreenSurface: Equatable, Sendable {
         }
         let across = atan2(dot(gaze, normalize(right)), dot(gaze, horizontalAhead))
         let rise = asin(min(max(dot(gaze, normalize(up)), -1), 1))
-        var position = SIMD2(across / halfArc, rise * rowRadius / length(up))
+        var position = SIMD2(across / halfArc, mercatorHeight(rise) * rowRadius / (wrap * length(up)))
         let step: Float = 1e-3
         for _ in 0..<20 {
             let miss = off(position)
@@ -410,13 +397,13 @@ public struct RoomScreen: Equatable, Sendable {
         let wrap = spherical ? min(max(verticalWrap, 0), 1) : 0
         var rowRadius = max(placement.distance * (spherical ? 1 : curveRadius), halfWidth / maxHalfArc)
         if wrap > 0 {
-            // Opened out until the top and bottom rows neither pass the
-            // poles nor, widened to keep their pixels' size, wrap too far.
+            // Opened out until the top and bottom rows stay short of the
+            // poles.
             for _ in 0..<80 {
                 let columnRadius = rowRadius / wrap
-                let rise = halfHeight / columnRadius
+                let rise = mercatorRise(halfHeight / columnRadius)
                 let edgeRow = rowRadius - columnRadius * (1 - cos(rise))
-                if rise <= maxHalfRise, edgeRow >= 0.35 * rowRadius, halfWidth / edgeRow <= maxHalfArc { break }
+                if rise <= maxHalfRise, edgeRow >= 0.35 * rowRadius { break }
                 rowRadius *= 1.05
             }
         }
@@ -424,6 +411,19 @@ public struct RoomScreen: Equatable, Sendable {
             center: SIMD3(0, 0, -placement.distance), right: SIMD3(halfWidth, 0, 0), up: SIMD3(0, halfHeight, 0),
             halfArc: halfWidth / rowRadius, spin: placement.orientation, wrap: wrap)
     }
+}
+
+/// The angle up a Mercator map at `height` along it, both in radians: the
+/// map's rows crowd towards the poles by just as much as the circles they
+/// lie on shrink, so shapes keep their proportions.
+func mercatorRise(_ height: Float) -> Float {
+    atan(sinh(height))
+}
+
+/// How far along a Mercator map the angle `rise` up lies.
+func mercatorHeight(_ rise: Float) -> Float {
+    let clamped = min(max(rise, -1.55), 1.55)
+    return log(tan(.pi / 4 + clamped / 2))
 }
 
 /// The columns of pixels each capture of a `width` pixel wide screen

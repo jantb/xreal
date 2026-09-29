@@ -365,24 +365,41 @@ func lookingAtATiltedScreenFindsThePixelThere(curved: Bool) throws {
     #expect(elevation > 0.5)
 }
 
-@Test func aFullyWrappedCanvasKeepsItsPixelsTheSameSizeNearTheTopAsInTheMiddle() {
-    let wrapped = RoomScreen(width: 3832, height: 4320, spherical: true).surface()
-    let step: Float = 0.01
-    for y in [Float(0), 0.6, 0.95] {
-        for x in [Float(0), 0.8] {
-            // A pixel's width along its row, and its height square to it:
-            // off the middle column the columns fan out, so pixels there
-            // lean a little but keep their size.
-            func size(at x: Float, _ y: Float) -> (width: Float, height: Float) {
-                let here = wrapped.point(at: SIMD2(x, y))
-                let across = wrapped.point(at: SIMD2(x + step, y)) - here
-                let down = wrapped.point(at: SIMD2(x, y + step)) - here
-                let square = down - dot(down, normalize(across)) * normalize(across)
-                return (simd_length(across) / simd_length(here), simd_length(square) / simd_length(here))
-            }
-            let (here, middle) = (size(at: x, y), size(at: 0, 0))
-            #expect(abs(here.width / middle.width - 1) < 0.01, "x \(x) y \(y)")
-            #expect(abs(here.height / middle.height - 1) < 0.01, "x \(x) y \(y)")
+/// A pixel's footprint as the eyes see it when looking straight at it with
+/// the head level: its width and height on the view, and how far its sides
+/// lean from upright, in radians.
+private func footprint(of surface: ScreenSurface, at position: SIMD2<Float>, step: Float = 1e-3)
+    -> (width: Float, height: Float, lean: Float, tilt: Float)
+{
+    let here = surface.point(at: position)
+    let forward = normalize(here)
+    let right = normalize(cross(forward, SIMD3(0, 1, 0)))
+    let up = cross(right, forward)
+    func onView(_ point: SIMD3<Float>) -> SIMD2<Float> {
+        let direction = normalize(point)
+        return SIMD2(dot(direction, right), dot(direction, up)) / dot(direction, forward)
+    }
+    let origin = onView(here)
+    let across = onView(surface.point(at: position + SIMD2(step, 0))) - origin
+    let upward = onView(surface.point(at: position + SIMD2(0, step))) - origin
+    return (simd_length(across), simd_length(upward), atan2(upward.x, upward.y), atan2(across.y, across.x))
+}
+
+@Test func aFullyWrappedCanvasShowsEveryPixelSquareAndUprightWhereverItIsLookedAt() {
+    let wrapped = RoomScreen(width: 5752, height: 2160, spherical: true).surface()
+    let middle = footprint(of: wrapped, at: .zero)
+    for x in [Float(-0.95), -0.4, 0, 0.5, 0.95] {
+        for y in [Float(-0.95), -0.5, 0, 0.5, 0.95] {
+            let pixel = footprint(of: wrapped, at: SIMD2(x, y))
+            // As tall as wide on the canvas as in the middle: its shape kept.
+            #expect(abs((pixel.height / pixel.width) / (middle.height / middle.width) - 1) < 0.01, "x \(x) y \(y)")
+            // Neither leaning nor tilted.
+            #expect(abs(pixel.lean) < 0.01, "x \(x) y \(y)")
+            #expect(abs(pixel.tilt) < 0.01, "x \(x) y \(y)")
+            // A little smaller away from the middle row, never larger, and
+            // by no more than the row's circle shrinks.
+            #expect(pixel.width <= middle.width * 1.001, "x \(x) y \(y)")
+            #expect(pixel.width > middle.width * 0.9, "x \(x) y \(y)")
         }
     }
 }

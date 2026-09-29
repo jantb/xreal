@@ -123,25 +123,11 @@ private func elevation(_ point: SIMD3<Float>) -> Float {
     #expect(sample.memory != nil)
 }
 
-@Test func onAWrappedCanvasTheRowCarriesOnUpTheSameSphereAboveItsTopEdge() throws {
-    let wrapped = RoomScreen(width: 5752, height: 2160, spherical: true)
-    let layout = overheadLayout(canvas: wrapped, dashboard: SIMD2(2400, 172), pinned: SIMD2(800, 600))
-    let row = overheadPanels(canvas: wrapped, layout: layout)
-    let board = try #require(row.dashboard)
-    for x in [board.left, 0, board.right] {
-        let bottom = row.surface.point(at: SIMD2(x, board.bottom))
-        let edge = wrapped.surface().point(at: SIMD2(x, 1))
-        #expect(elevation(bottom) > elevation(edge), "x \(x)")
-        // Still on the sphere, facing the viewer.
-        #expect(abs(simd_length(bottom) - 1) < 1e-4, "x \(x)")
-    }
-}
-
-@Test func everyPixelOfTheRowAboveFacesTheViewerWhateverTheCanvasShape() throws {
+@Test func theTiltedRowStaysClearAboveEveryCanvasShape() throws {
     let shapes = [
         RoomScreen(width: 5752, height: 2160), RoomScreen(width: 5752, height: 2160, curved: true),
         RoomScreen(width: 5752, height: 2160, spherical: true),
-        RoomScreen(width: 5752, height: 2160, spherical: true, verticalWrap: 0.4),
+        RoomScreen(width: 3832, height: 4320, spherical: true, verticalWrap: 0.5),
     ]
     for (index, shape) in shapes.enumerated() {
         var screen = shape
@@ -151,21 +137,14 @@ private func elevation(_ point: SIMD3<Float>) -> Float {
         let turn = screen.placement.orientation.inverse
         let seen = { (point: SIMD3<Float>) in elevation(turn.act(point)) }
         for rect in [try #require(row.dashboard), try #require(row.pinned)] {
-            for x in [rect.left, (rect.left + rect.right) / 2, rect.right] {
-                for y in [rect.bottom, (rect.bottom + rect.top) / 2, rect.top] {
-                    let point = row.surface.point(at: SIMD2(x, y))
-                    let across = row.surface.point(at: SIMD2(x + 0.001, y)) - row.surface.point(at: SIMD2(x - 0.001, y))
-                    let upward = row.surface.point(at: SIMD2(x, y + 0.001)) - row.surface.point(at: SIMD2(x, y - 0.001))
-                    #expect(abs(simd_length(point) - 1.3) < 1e-3, "shape \(index) x \(x) y \(y)")
-                    #expect(abs(dot(normalize(across), normalize(point))) < 1e-2, "shape \(index) x \(x) y \(y)")
-                    #expect(abs(dot(normalize(upward), normalize(point))) < 1e-2, "shape \(index) x \(x) y \(y)")
-                }
-            }
-            // Clear of the canvas below, all along.
-            for x in [rect.left, 0, rect.right] where x >= -1 && x <= 1 {
-                #expect(seen(row.surface.point(at: SIMD2(x, rect.bottom))) > seen(screen.surface().point(at: SIMD2(x, 1))),
-                    "shape \(index) x \(x)")
+            for x in [rect.left, 0, rect.right] {
+                let edge = screen.surface().point(at: SIMD2(min(max(x, -1), 1), 1))
+                #expect(seen(row.surface.point(at: SIMD2(x, rect.bottom))) > seen(edge), "shape \(index) x \(x)")
             }
         }
+        // Its middle faces the eyes.
+        let middle = row.surface.point(at: .zero)
+        let upward = row.surface.point(at: SIMD2(0, 0.01)) - row.surface.point(at: SIMD2(0, -0.01))
+        #expect(abs(dot(normalize(upward), normalize(middle))) < 1e-2, "shape \(index)")
     }
 }
