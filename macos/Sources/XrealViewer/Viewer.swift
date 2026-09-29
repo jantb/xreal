@@ -116,6 +116,8 @@ enum ViewerCommand {
     case calibrate
     case toggleCurved
     case toggleSpherical
+    case toggleEvenTextSize
+    case toggleSoftEdges
     /// How far a wrapped canvas bends up and down, 0 to 1.
     case setVerticalWrap(Float)
     /// Picks up (true) or lets go of (false) the canvas, if looked at.
@@ -457,8 +459,8 @@ final class FrameLoop: @unchecked Sendable {
         let dt = Float(min(max(now - lastRenderAt, 0), 0.1))
         lastRenderAt = now
 
-        let (captures, pinned, fence, sharpen) = shared.mutex.withLock {
-            ($0.captures, $0.pinned, $0.cursorFence, $0.settings.sharpFiltering)
+        let (captures, pinned, fence, sharpen, softEdges) = shared.mutex.withLock {
+            ($0.captures, $0.pinned, $0.cursorFence, $0.settings.sharpFiltering, $0.settings.softEdges)
         }
         let ids = captures.map(ObjectIdentifier.init)
         if ids != sources {
@@ -518,7 +520,8 @@ final class FrameLoop: @unchecked Sendable {
                 $0.presented(promised: presentingAt, at: at > 0 ? at : nil, sampledAt: now, period: period)
             }
         }
-        renderer.draw(to: drawable, images: images, room: result.room, sharpen: sharpen) { gpuEnd in
+        renderer.draw(to: drawable, images: images, room: result.room, sharpen: sharpen, softEdges: softEdges) {
+            gpuEnd in
             timing.mutex.withLock { $0.worked(gpuEnd - now, period: period) }
         }
         if result.biasChanged {
@@ -688,6 +691,8 @@ final class FrameLoop: @unchecked Sendable {
                 persist = false
             case .toggleCurved: state.settings.canvas.curved.toggle()
             case .toggleSpherical: state.settings.canvas.spherical.toggle()
+            case .toggleEvenTextSize: state.settings.canvas.evenSize.toggle()
+            case .toggleSoftEdges: state.settings.softEdges.toggle()
             case .setVerticalWrap(let wrap): state.settings.canvas.verticalWrap = min(max(wrap, 0), 1)
             case .grab(let pickUp):
                 // Saved once it is let go.

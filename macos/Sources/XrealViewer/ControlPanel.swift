@@ -265,6 +265,12 @@ private struct CanvasSection: View {
                         "At 100% the canvas is part of a ball round you: every pixel faces you and keeps its shape, a little smaller towards the top and bottom. Less bends it less up and down."
                     )
                     .font(.caption).foregroundStyle(.secondary)
+                    Toggle(
+                        "Even Out Text Size", isOn: model.toggle(\.settings.canvas.evenSize, .toggleEvenTextSize))
+                    Text(
+                        "Text is then a few percent larger in the middle and smaller at the top and bottom, rather than full size in the middle and smallest at the edges."
+                    )
+                    .font(.caption).foregroundStyle(.secondary)
                 }
             } else {
                 VStack(alignment: .leading) {
@@ -288,10 +294,18 @@ private struct CanvasSection: View {
                 Slider(
                     value: Binding(
                         get: { log(settings.metresPerRoomUnit) },
-                        set: { model.perform(.setDepthScale(exp($0))) }),
+                        set: { model.perform(.setDepthScale(snappedViewingDistance(exp($0)))) }),
                     in: log(minViewingDistance)...log(maxViewingDistance))
+                HStack {
+                    Button("Match the Glasses' Focus") { model.perform(.setDepthScale(glassesFocusDistance)) }
+                        .disabled(settings.metresPerRoomUnit == glassesFocusDistance)
+                    if settings.metresPerRoomUnit == glassesFocusDistance {
+                        Label("Eyes aim and focus at the same distance", systemImage: "checkmark.circle.fill")
+                            .font(.caption).foregroundStyle(.green)
+                    }
+                }
                 Text(
-                    "Nearer shows more depth between the eyes' views; the canvas keeps its size. About 4 m is where the glasses' optics focus, easiest on the eyes."
+                    "Nearer shows more depth between the eyes' views; the canvas keeps its size. The glasses' optics focus at about 4 m, where the slider snaps: there the eyes aim and focus at the same distance, easiest on them over hours."
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }
@@ -326,6 +340,7 @@ private struct ViewSection: View {
             Toggle("Draw Pointer Live", isOn: model.toggle(\.settings.livePointer, .toggleLivePointer))
             Toggle("Zoom Out to Show Cursor", isOn: model.toggle(\.settings.followCursor, .toggleFollowCursor))
             Toggle("Sharpen Text", isOn: model.toggle(\.settings.sharpFiltering, .toggleSharpFiltering))
+            Toggle("Soft Edges", isOn: model.toggle(\.settings.softEdges, .toggleSoftEdges))
             Toggle("Correct Lens Distortion", isOn: model.toggle(\.settings.lensCorrection, .toggleLensCorrection))
             VStack(alignment: .leading) {
                 Toggle(

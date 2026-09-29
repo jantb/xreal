@@ -16,7 +16,8 @@ private let shaderSource = """
         float4 center, right, up;  // room coordinates; half extents
         float4 shape;              // x: half arc (0 flat), yz: left and right, w: segments
         float4 rect;               // x: top, y: bottom, z: lean towards the viewer, w: how far columns wrap
-        float4 outline;            // x: 1 to outline the canvas; y: rows it is drawn in; z: 1 to sharpen
+        float4 outline;            // x: 1 to outline the canvas; y: rows it is drawn in; z: 1 to sharpen;
+                                   // w: soften the edges of 1 the whole canvas, 2 this panel
         float4 spin0, spin1, spin2;  // turns the upright screen to its tilt
         float4 lens;               // xy: where the lens lookup starts, z: its step, w: 1 to use it
         float4 lensGrid;           // xy: the lookup's columns and rows, zw: the eye's size in pixels
@@ -122,8 +123,18 @@ private let shaderSource = """
                                   sampler linear [[sampler(0)]]) {
         // Derivatives first, while every pixel of the quad still runs.
         float2 edgeWidth = fwidth(in.screenUV);
+        float2 panelWidth = fwidth(in.uv);
         float2 dx = dfdx(in.uv);
         float2 dy = dfdy(in.uv);
+        // Fades out over the last few glasses pixels of the canvas or the
+        // panel, so it ends softly against the room instead of in a hard cut.
+        float fade = 1;
+        if (panel.outline.w > 0.5) {
+            bool whole = panel.outline.w < 1.5;
+            float2 at = whole ? in.screenUV : in.uv;
+            float2 fromEdge = min(at, 1 - at) / max(whole ? edgeWidth : panelWidth, float2(1e-6));
+            fade = saturate(min(fromEdge.x, fromEdge.y) / 6);
+        }
         if (panel.outline.x > 0.5) {
             // About three glasses pixels wide, however far away the screen is.
             float2 fromEdge = min(in.screenUV, 1 - in.screenUV) / edgeWidth;
@@ -140,14 +151,16 @@ private let shaderSource = """
         // so the pointer's see-through parts blend over the canvas.
         float2 size = float2(source.get_width(), source.get_height());
         if (max(length(dx * size), length(dy * size)) < 1.02) {
-            return panel.outline.z > 0.5 ? sampleSharp(source, linear, in.uv, size) : source.sample(linear, in.uv);
+            return fade * (panel.outline.z > 0.5 ? sampleSharp(source, linear, in.uv, size) : source.sample(linear, in.uv));
         }
-        return (source.sample(linear, in.uv + 0.25 * (dx + dy)) + source.sample(linear, in.uv + 0.25 * (dx - dy))
-            + source.sample(linear, in.uv - 0.25 * (dx + dy)) + source.sample(linear, in.uv - 0.25 * (dx - dy)))
-            * 0.25;
+        return fade * 0.25
+            * (source.sample(linear, in.uv + 0.25 * (dx + dy)) + source.sample(linear, in.uv + 0.25 * (dx - dy))
+                + source.sample(linear, in.uv - 0.25 * (dx + dy)) + source.sample(linear, in.uv - 0.25 * (dx - dy)));
     }
     """
 
+// Samples a pixel, for smooth edges.
+private let sampleCount = 4
 // Clip distances for the room's depth range, in room units (1 is where the
 // canvas shows at the glasses' pixel density).
 private let nearClip: Float = 0.05
@@ -193,8 +206,8 @@ final class Renderer: @unchecked Sendable {
     // The pointer is drawn over the canvas it lies on, whatever the depth.
     private let overDepthState: MTLDepthStencilState
     private let sampler: MTLSamplerState
-    // Matches the drawable size; recreated when that changes.
-    private var depthTexture: MTLTexture?
+    // Match the drawable size; recreated when that changes.
+    private var sampled: (color: MTLTexture, depth: MTLTexture)?
     // Each eye's lens offsets, for the vertex shader, and the distortion
     // they were made from.
     private var lensTextures: [(distortion: LensDistortion, texture: MTLTexture)?] = []
@@ -213,6 +226,7 @@ final class Renderer: @unchecked Sendable {
         panelDescriptor.vertexFunction = library.makeFunction(name: "panelVertex")
         panelDescriptor.fragmentFunction = library.makeFunction(name: "panelFragment")
         panelDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        panelDescriptor.rasterSampleCount = sampleCount
         // Premultiplied: opaque images cover what is behind, the pointer's
         // see-through parts let it show.
         let blend = panelDescriptor.colorAttachments[0]!
@@ -266,16 +280,21 @@ final class Renderer: @unchecked Sendable {
     /// black when there is nothing to show. `onFinished` is called with the
     /// time the GPU finished the frame.
     func draw(
-        to drawable: CAMetalDrawable, images: PanelImages, room: RoomView?, sharpen: Bool,
+        to drawable: CAMetalDrawable, images: PanelImages, room: RoomView?, sharpen: Bool, softEdges: Bool = true,
         onFinished: @escaping @Sendable (_ gpuEnd: Double) -> Void = { _ in }
     ) {
         guard let commandBuffer = queue.makeCommandBuffer() else { return }
         let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = drawable.texture
+        // Drawn with several samples a pixel, so edges come out smooth
+        // rather than stepped and crawling as the head moves, then resolved
+        // into the drawable. The samples never leave the GPU's tile memory.
+        guard let targets = sampleTargets(matching: drawable.texture) else { return }
+        pass.colorAttachments[0].texture = targets.color
+        pass.colorAttachments[0].resolveTexture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-        pass.colorAttachments[0].storeAction = .store
-        pass.depthAttachment.texture = depthTexture(matching: drawable.texture)
+        pass.colorAttachments[0].storeAction = .multisampleResolve
+        pass.depthAttachment.texture = targets.depth
         pass.depthAttachment.loadAction = .clear
         pass.depthAttachment.clearDepth = 1
         pass.depthAttachment.storeAction = .dontCare
@@ -296,7 +315,7 @@ final class Renderer: @unchecked Sendable {
                 let scanEnd = room.scanEndRotation.map { Self.viewProjection(eye, headRotation: $0) }
                 drawPanels(
                     of: room, eye: eye, viewProjection: viewProjection, scanEndViewProjection: scanEnd ?? viewProjection,
-                    images: images, sharpen: sharpen, encoder: encoder)
+                    images: images, sharpen: sharpen, softEdges: softEdges, encoder: encoder)
             }
         }
         encoder.endEncoding()
@@ -311,7 +330,7 @@ final class Renderer: @unchecked Sendable {
 
     private func drawPanels(
         of room: RoomView, eye: EyeOptics, viewProjection: simd_float4x4, scanEndViewProjection: simd_float4x4,
-        images: PanelImages, sharpen: Bool, encoder: MTLRenderCommandEncoder
+        images: PanelImages, sharpen: Bool, softEdges: Bool, encoder: MTLRenderCommandEncoder
     ) {
         let lens = eye.distortion.map { SIMD4<Float>($0.origin.x, $0.origin.y, $0.step, 1) } ?? .zero
         let lensGrid = SIMD4(
@@ -335,7 +354,9 @@ final class Renderer: @unchecked Sendable {
                 center: SIMD4(surface.center, 1), right: SIMD4(surface.right, 0), up: SIMD4(surface.up, 0),
                 shape: SIMD4(surface.halfArc, rect.left, rect.right, Float(segments)),
                 rect: SIMD4(rect.top, rect.bottom, surface.lean, surface.wrap),
-                outline: SIMD4(panel.highlighted ? 1 : 0, Float(rows), isCanvas && sharpen ? 1 : 0, 0),
+                outline: SIMD4(
+                    panel.highlighted ? 1 : 0, Float(rows), isCanvas && sharpen ? 1 : 0,
+                    !softEdges || panel.source == .pointer ? 0 : isCanvas ? 1 : 2),
                 spin0: SIMD4(spin.columns.0, 0), spin1: SIMD4(spin.columns.1, 0), spin2: SIMD4(spin.columns.2, 0),
                 lens: lens, lensGrid: lensGrid)
             encoder.setDepthStencilState(panel.source == .pointer ? overDepthState : depthState)
@@ -417,15 +438,22 @@ final class Renderer: @unchecked Sendable {
         return projection * view
     }
 
-    private func depthTexture(matching target: MTLTexture) -> MTLTexture? {
-        if let depthTexture, depthTexture.width == target.width, depthTexture.height == target.height {
-            return depthTexture
+    /// The multisampled colour and depth to draw into, the size of `target`.
+    private func sampleTargets(matching target: MTLTexture) -> (color: MTLTexture, depth: MTLTexture)? {
+        if let sampled, sampled.color.width == target.width, sampled.color.height == target.height {
+            return sampled
         }
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .depth32Float, width: target.width, height: target.height, mipmapped: false)
-        descriptor.usage = .renderTarget
-        descriptor.storageMode = .private
-        depthTexture = device.makeTexture(descriptor: descriptor)
-        return depthTexture
+        func texture(_ format: MTLPixelFormat) -> MTLTexture? {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: format, width: target.width, height: target.height, mipmapped: false)
+            descriptor.textureType = .type2DMultisample
+            descriptor.sampleCount = sampleCount
+            descriptor.usage = .renderTarget
+            descriptor.storageMode = .memoryless
+            return device.makeTexture(descriptor: descriptor)
+        }
+        guard let color = texture(.bgra8Unorm_srgb), let depth = texture(.depth32Float) else { return nil }
+        sampled = (color, depth)
+        return sampled
     }
 }

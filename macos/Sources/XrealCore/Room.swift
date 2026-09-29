@@ -347,10 +347,15 @@ public struct RoomScreen: Equatable, Sendable {
     /// How far a spherical screen's columns bend, from 0, straight, to 1,
     /// part of a sphere round the eyes.
     public var verticalWrap: Float
+    /// Shares out how much smaller a spherical screen's pixels are near its
+    /// top and bottom: a little larger in the middle, a little smaller at
+    /// the edges, instead of full size in the middle and smallest at the
+    /// edges.
+    public var evenSize: Bool
 
     public init(
         width: Int, height: Int, scale: Int = 1, placement: ScreenPlacement = .straightAhead, curved: Bool = false,
-        spherical: Bool = false, verticalWrap: Float = 1
+        spherical: Bool = false, verticalWrap: Float = 1, evenSize: Bool = true
     ) {
         self.width = width
         self.height = height
@@ -359,6 +364,7 @@ public struct RoomScreen: Equatable, Sendable {
         self.curved = curved
         self.spherical = spherical
         self.verticalWrap = verticalWrap
+        self.evenSize = evenSize
     }
 
     /// Whether a virtual screen of this size can be made without upsetting
@@ -396,20 +402,37 @@ public struct RoomScreen: Equatable, Sendable {
         let (halfWidth, halfHeight) = (length(right), length(up))
         let wrap = spherical ? min(max(verticalWrap, 0), 1) : 0
         var rowRadius = max(placement.distance * (spherical ? 1 : curveRadius), halfWidth / maxHalfArc)
+        // Pixels at the top and bottom rows shrink with their circle; drawn
+        // `grow` times larger all over, the middle comes out as much above
+        // its own size as the edges fall below it.
+        var grow: Float = 1
         if wrap > 0 {
-            // Opened out until the top and bottom rows stay short of the
-            // poles.
+            // Opened out until the top and bottom rows, grown as they will
+            // be, stay short of the poles and the rows short of meeting
+            // behind.
             for _ in 0..<80 {
                 let columnRadius = rowRadius / wrap
-                let rise = mercatorRise(halfHeight / columnRadius)
-                let edgeRow = rowRadius - columnRadius * (1 - cos(rise))
-                if rise <= maxHalfRise, edgeRow >= 0.35 * rowRadius { break }
+                func edgeRow(_ grow: Float) -> Float {
+                    rowRadius - columnRadius * (1 - cos(mercatorRise(halfHeight * grow / columnRadius)))
+                }
+                grow = 1
+                if evenSize {
+                    // The edge moves as the growth does: a few rounds settle it.
+                    for _ in 0..<6 {
+                        grow = 2 / (1 + max(edgeRow(grow), 0) / rowRadius)
+                    }
+                }
+                let rise = mercatorRise(halfHeight * grow / columnRadius)
+                if rise <= maxHalfRise, edgeRow(grow) >= 0.35 * rowRadius, halfWidth * grow / rowRadius <= maxHalfArc {
+                    break
+                }
                 rowRadius *= 1.05
             }
         }
         return ScreenSurface(
-            center: SIMD3(0, 0, -placement.distance), right: SIMD3(halfWidth, 0, 0), up: SIMD3(0, halfHeight, 0),
-            halfArc: halfWidth / rowRadius, spin: placement.orientation, wrap: wrap)
+            center: SIMD3(0, 0, -placement.distance), right: SIMD3(halfWidth * grow, 0, 0),
+            up: SIMD3(0, halfHeight * grow, 0), halfArc: halfWidth * grow / rowRadius, spin: placement.orientation,
+            wrap: wrap)
     }
 }
 

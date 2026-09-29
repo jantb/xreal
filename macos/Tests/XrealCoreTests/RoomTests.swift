@@ -426,3 +426,32 @@ private func footprint(of surface: ScreenSurface, at position: SIMD2<Float>, ste
         }
     }
 }
+
+@Test func evenedOutTextSizeHalvesHowFarItStraysFromFullSize() {
+    var screen = RoomScreen(width: 5752, height: 2160, spherical: true, evenSize: false)
+    let plain = screen.surface()
+    screen.evenSize = true
+    let evened = screen.surface()
+    let full = footprint(of: plain, at: .zero).width
+    let stray = { (surface: ScreenSurface) in
+        [SIMD2<Float>(0, 0), SIMD2(0, 0.99), SIMD2(0.8, -0.99)].map { abs(footprint(of: surface, at: $0).width / full - 1) }
+            .max() ?? 0
+    }
+    #expect(stray(plain) > 0.03)
+    #expect(stray(evened) < stray(plain) * 0.6)
+    // Still the same distance everywhere.
+    #expect(abs(simd_length(evened.point(at: SIMD2(0.9, 0.9))) - 1) < 1e-4)
+}
+
+@Test func theLargestWrappedCanvasesEvenedOutStayShortOfThePolesAndOfMeetingBehind() {
+    for (width, height) in [(7672, 4320), (7672, 2160), (5120, 2160), (1920, 1080)] {
+        let surface = RoomScreen(width: width, height: height, spherical: true).surface()
+        for x in [Float(-1), 0, 1] {
+            let top = surface.point(at: SIMD2(x, 1))
+            #expect(atan2(top.y, simd_length(SIMD2(top.x, top.z))) < 1.2, "\(width)x\(height) x \(x)")
+        }
+        let side = surface.point(at: SIMD2(1, 0))
+        // The right edge is still on the right, short of behind the viewer.
+        #expect(atan2(side.x, -side.z) > 0 && atan2(side.x, -side.z) < 3, "\(width)x\(height)")
+    }
+}

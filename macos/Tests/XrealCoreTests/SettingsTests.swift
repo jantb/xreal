@@ -176,3 +176,21 @@ import simd
         #expect(Settings.parse("canvas=\(other)@0,0,-1,1\n").canvas == Settings().canvas, "\(other)")
     }
 }
+
+@Test func theViewingDistanceSnapsToTheGlassesFocusWhenCloseAndStartsThere() {
+    #expect(snappedViewingDistance(3.8) == glassesFocusDistance)
+    #expect(snappedViewingDistance(4.25) == glassesFocusDistance)
+    #expect(snappedViewingDistance(2) == 2)
+    #expect(snappedViewingDistance(6) == 6)
+    #expect(Settings().metresPerRoomUnit == glassesFocusDistance)
+}
+
+@Test func softEdgesAndEvenTextSizeStayChosenAfterARestart() {
+    var settings = Settings()
+    settings.softEdges = false
+    settings.canvas.evenSize = false
+    let loaded = Settings.parse(settings.serialize())
+    #expect(!loaded.softEdges)
+    #expect(!loaded.canvas.evenSize)
+    #expect(Settings.parse("").softEdges && Settings.parse("").canvas.evenSize)
+}

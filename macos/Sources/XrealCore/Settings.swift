@@ -11,6 +11,17 @@ private let maxCurveRadius: Float = 10
 /// the canvas can change.
 public let canvasRefreshRates = [60, 90]
 
+/// How far away, in metres, the glasses' optics show their picture in
+/// focus. With the stereo depth set the same, the eyes aim and focus at one
+/// distance, which is easiest on them.
+public let glassesFocusDistance: Float = 4
+
+/// `metres` as the viewing distance slider leaves it: close to the
+/// glasses' focus it snaps onto it.
+public func snappedViewingDistance(_ metres: Float) -> Float {
+    abs(log(metres / glassesFocusDistance)) < 0.08 ? glassesFocusDistance : metres
+}
+
 /// A window to show above the canvas, found by its app and title.
 public struct PinnedWindow: Equatable, Hashable, Sendable {
     public var bundleID: String
@@ -52,8 +63,12 @@ public struct Settings: Equatable, Sendable {
     /// edges stay straight to the corners of the view.
     public var lensCorrection = true
     /// How many metres a room unit is: the canvas at distance 1 is this far
-    /// away. Nearer shows more depth between its parts.
-    public var metresPerRoomUnit: Float = 1
+    /// away. Nearer shows more depth between its parts. It starts where the
+    /// glasses' optics focus.
+    public var metresPerRoomUnit: Float = glassesFocusDistance
+    /// Fades the last few pixels of the canvas and what hangs above it, so
+    /// they end softly against the room.
+    public var softEdges = true
     /// How often macOS draws the canvas; one of `canvasRefreshRates`.
     public var canvasRefreshRate = 90
     /// Takes the head pose as late before each frame as the frame's work
@@ -101,6 +116,7 @@ public struct Settings: Equatable, Sendable {
         // the glasses alone was the canvas.
         var glassesOnlyScreen: RoomScreen?
         var verticalWrap: Float?
+        var evenSize: Bool?
         for line in text.split(whereSeparator: \.isNewline) {
             guard let separator = line.firstIndex(of: "=") else { continue }
             let key = line[..<separator].trimmingCharacters(in: .whitespaces)
@@ -134,6 +150,11 @@ public struct Settings: Equatable, Sendable {
             case "late_pose_sampling": parse(value, into: &settings.latePoseSampling)
             case "full_screen_window": parse(value, into: &settings.fullScreenWindow)
             case "sharp_filtering": parse(value, into: &settings.sharpFiltering)
+            case "soft_edges": parse(value, into: &settings.softEdges)
+            case "even_text_size":
+                var even = true
+                parse(value, into: &even)
+                evenSize = even
             case "live_pointer": parse(value, into: &settings.livePointer)
             case "status_strip": parse(value, into: &settings.statusStrip)
             case "pinned_window":
@@ -159,6 +180,9 @@ public struct Settings: Equatable, Sendable {
         if let verticalWrap {
             settings.canvas.verticalWrap = verticalWrap
         }
+        if let evenSize {
+            settings.canvas.evenSize = evenSize
+        }
         return settings
     }
 
@@ -175,6 +199,7 @@ public struct Settings: Equatable, Sendable {
             "gyro_bias_slope_z=\(gyroBiasSlope.z)",
             "canvas=\(Self.serialize(canvas))",
             "vertical_wrap=\(canvas.verticalWrap)",
+            "even_text_size=\(canvas.evenSize)",
             "follow_roll=\(followRoll)",
             "follow_cursor=\(followCursor)",
             "curve_radius=\(curveRadius)",
@@ -184,6 +209,7 @@ public struct Settings: Equatable, Sendable {
             "late_pose_sampling=\(latePoseSampling)",
             "full_screen_window=\(fullScreenWindow)",
             "sharp_filtering=\(sharpFiltering)",
+            "soft_edges=\(softEdges)",
             "live_pointer=\(livePointer)",
             "status_strip=\(statusStrip)",
         ] + (pinnedWindow.map { ["pinned_window=\($0.bundleID)|\($0.title.filter { !$0.isNewline })"] } ?? [])
