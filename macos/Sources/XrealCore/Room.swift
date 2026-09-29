@@ -54,6 +54,13 @@ public struct ScreenPlacement: Equatable, Sendable {
         simd_quatf(angle: tilt, axis: direction)
     }
 
+    /// Turns a screen straight ahead and level to where this one hangs,
+    /// tilt included.
+    public var orientation: simd_quatf {
+        let (right, up) = uprightAxes
+        return spin * simd_quatf(simd_float3x3(right, up, -direction))
+    }
+
     /// The upright screen's up and right directions.
     private var uprightAxes: (right: SIMD3<Float>, up: SIMD3<Float>) {
         let right = normalize(cross(direction, worldUp))
@@ -98,9 +105,9 @@ public struct ScreenPlacement: Equatable, Sendable {
 }
 
 /// A screen's surface in the room: flat, or curved like a monitor, as
-/// tightly as asked. Curved, every row is the same level arc round an
-/// upright axis `rowRadius` behind its middle, and every column a straight
-/// line, so its top and bottom are as wide as its middle. Positions on it
+/// tightly as asked. Curved, every row is the same arc round the axis along
+/// `up` `rowRadius` behind its middle, and every column a straight line, so
+/// its top and bottom are as wide as its middle. Positions on it
 /// run from -1 to 1 across and from -1 at the bottom to 1 at the top.
 public struct ScreenSurface: Equatable, Sendable {
     /// Middle of the screen.
@@ -230,17 +237,33 @@ public struct ScreenSurface: Equatable, Sendable {
 
 /// A virtual screen and where it hangs in the room.
 public struct RoomScreen: Equatable, Sendable {
+    /// The size in points. At distance 1 each point shows on one glasses
+    /// pixel.
     public var width: Int
     public var height: Int
+    /// Pixels per point: 2 for a HiDPI screen, whose finer pixels are
+    /// filtered down onto the glasses' ones.
+    public var scale: Int
     public var placement: ScreenPlacement
     /// Bent around the viewer, so every part of a row is equally far away.
     public var curved: Bool
 
-    public init(width: Int, height: Int, placement: ScreenPlacement = .straightAhead, curved: Bool = false) {
+    public init(
+        width: Int, height: Int, scale: Int = 1, placement: ScreenPlacement = .straightAhead, curved: Bool = false
+    ) {
         self.width = width
         self.height = height
+        self.scale = scale
         self.placement = placement
         self.curved = curved
+    }
+
+    /// Whether a virtual screen of this size can be made without upsetting
+    /// macOS.
+    public static func isAllowed(width: Int, height: Int, scale: Int) -> Bool {
+        // Checked before multiplying, so no size can overflow.
+        (scale == 1 || scale == 2) && (1...maxVirtualScreenSide / scale).contains(width)
+            && (1...maxVirtualScreenSide / scale).contains(height)
     }
 
     /// Where `pixel` of the screen (x right, y down) is in the room, bent by
@@ -256,14 +279,15 @@ public struct RoomScreen: Equatable, Sendable {
     /// evenly, less bends it more, more bends it less.
     public func surface(curveRadius: Float = 1) -> ScreenSurface {
         let (center, right, up) = placement.frame(width: width, height: height)
-        let spin = placement.spin
-        guard curved else { return ScreenSurface(center: center, right: right, up: up, spin: spin) }
-        // The middle stays where it hangs; its rows curve round an upright
-        // axis `curveRadius` times as far away as it is level with the eyes.
-        let halfWidth = length(right)
-        let level = length(SIMD2(placement.direction.x, placement.direction.z))
-        let rowRadius = max(placement.distance * level * curveRadius, halfWidth / maxHalfArc)
-        return ScreenSurface(center: center, right: right, up: up, halfArc: halfWidth / rowRadius, spin: spin)
+        guard curved else { return ScreenSurface(center: center, right: right, up: up, spin: placement.spin) }
+        // Made straight ahead and level, where it bends evenly round the
+        // viewer, then turned as a whole to where it hangs: raised, lowered
+        // or tilted, it looks the same as straight ahead when faced.
+        let (halfWidth, halfHeight) = (length(right), length(up))
+        let rowRadius = max(placement.distance * curveRadius, halfWidth / maxHalfArc)
+        return ScreenSurface(
+            center: SIMD3(0, 0, -placement.distance), right: SIMD3(halfWidth, 0, 0), up: SIMD3(0, halfHeight, 0),
+            halfArc: halfWidth / rowRadius, spin: placement.orientation)
     }
 }
 
@@ -333,21 +357,40 @@ public struct ScreenGrab: Equatable, Sendable {
 
 /// The canvas as the glasses see it this frame.
 public struct RoomView: Sendable {
-    /// One capture of the canvas: the whole of it, or a tile of it.
+    /// Something drawn on the canvas's surface: a capture of the canvas or
+    /// of a tile of it, or one of the things shown with it.
     public struct Panel: Sendable {
-        /// Which capture to show.
-        public var source: Int
+        public enum Source: Equatable, Sendable {
+            /// The capture of this tile of the canvas.
+            case canvas(Int)
+            /// The status strip above the canvas.
+            case status
+            /// The window pinned above the canvas.
+            case pinned
+            /// The mouse pointer, drawn over the canvas.
+            case pointer
+        }
+
+        public var source: Source
         public var surface: ScreenSurface
-        /// The part of the canvas's width it covers, from -1 to 1.
-        public var span: SIMD2<Float>
+        /// The part of the surface it covers.
+        public var rect: SurfaceRect
         /// Outlined, because the canvas is being carried or was just moved.
         public var highlighted: Bool
 
-        public init(source: Int, surface: ScreenSurface, span: SIMD2<Float> = SIMD2(-1, 1), highlighted: Bool = false) {
+        public init(source: Source, surface: ScreenSurface, rect: SurfaceRect = .whole, highlighted: Bool = false) {
             self.source = source
             self.surface = surface
-            self.span = span
+            self.rect = rect
             self.highlighted = highlighted
+        }
+
+        /// The part of the canvas's width it covers, from -1 to 1.
+        public var span: SIMD2<Float> { SIMD2(rect.left, rect.right) }
+
+        /// The canvas tile it shows, if it is one.
+        public var tile: Int? {
+            if case .canvas(let tile) = source { tile } else { nil }
         }
     }
 
@@ -393,10 +436,11 @@ public struct RoomView: Sendable {
     /// the view) of it, judged from a grid of points on it.
     public func shows(_ panel: Panel, margin: Float) -> Bool {
         let limit = 1 + margin
+        let rect = panel.rect
         for column in 0...4 {
-            let x = panel.span.x + (panel.span.y - panel.span.x) * Float(column) / 4
+            let x = rect.left + (rect.right - rect.left) * Float(column) / 4
             for row in 0...4 {
-                let point = panel.surface.point(at: SIMD2(x, Float(row) / 2 - 1))
+                let point = panel.surface.point(at: SIMD2(x, rect.bottom + (rect.top - rect.bottom) * Float(row) / 4))
                 if let output = outputPoint(ofRoom: point), abs(output.x) <= limit, abs(output.y) <= limit {
                     return true
                 }

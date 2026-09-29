@@ -102,28 +102,40 @@ func probe(seconds: Double) {
     }
 }
 
-/// `--probe-sizes [WxH ...]`: creates a virtual screen of each size in turn
-/// and prints the size macOS actually gives it. macOS refuses or shrinks
-/// some sizes, and which ones changes between releases.
+/// `--probe-sizes [WxH[@2x] ...]`: creates a virtual screen of each size in
+/// turn and prints the size macOS actually gives it, in points and pixels.
+/// macOS refuses or shrinks some sizes, and which ones changes between
+/// releases. `@2x` asks for a HiDPI screen of that many points.
 @MainActor func probeSizes(_ arguments: [String]) {
-    let asked = arguments.compactMap { argument -> (Int, Int)? in
-        let parts = argument.split(separator: "x").compactMap { Int($0) }
-        return parts.count == 2 ? (parts[0], parts[1]) : nil
+    let asked = arguments.compactMap { argument -> (width: Int, height: Int, scale: Int)? in
+        let (size, scale) = argument.hasSuffix("@2x") ? (argument.dropLast(3), 2) : (Substring(argument), 1)
+        let parts = size.split(separator: "x").compactMap { Int($0) }
+        return parts.count == 2 ? (parts[0], parts[1], scale) : nil
     }
-    let sizes = asked.isEmpty ? canvasSizes.map { ($0.width, $0.height) } : asked
-    for (width, height) in sizes {
-        guard let screen = VirtualScreen(index: 63, width: width, height: height, refreshRate: glassesRefreshRate) else {
-            print("\(width)x\(height): refused")
+    let sizes = asked.isEmpty ? canvasSizes.map { ($0.width, $0.height, $0.scale) } : asked
+    for (width, height, scale) in sizes {
+        let name = "\(width)x\(height)" + (scale == 2 ? "@2x" : "")
+        guard
+            let screen = VirtualScreen(
+                index: 31, width: width, height: height, scale: scale, refreshRate: glassesRefreshRate)
+        else {
+            print("\(name): refused")
             continue
         }
-        var got = (0, 0)
+        var got = (points: (0, 0), pixels: (0, 0))
         let deadline = monotonicNow() + 5
         while monotonicNow() < deadline {
             RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
-            got = Displays.pixelSize(of: screen.displayID)
-            if got.0 > 0 { break }
+            if let mode = CGDisplayCopyDisplayMode(screen.displayID), mode.pixelWidth > 0 {
+                got = ((mode.width, mode.height), (mode.pixelWidth, mode.pixelHeight))
+                break
+            }
         }
-        print("\(width)x\(height): \(got == (width, height) ? "ok" : "came up as \(got.0)x\(got.1)")")
+        let expected = (points: (width, height), pixels: (width * scale, height * scale))
+        let ok = got.points == expected.points && got.pixels == expected.pixels
+        print(
+            "\(name): \(ok ? "ok" : "came up as") \(got.points.0)x\(got.points.1) points, "
+                + "\(got.pixels.0)x\(got.pixels.1) pixels")
         withExtendedLifetime(screen) {}
     }
 }

@@ -105,8 +105,10 @@ public struct ViewportController: Sendable {
         let width = Float(canvas.width)
         let panels = captureTiles(width: canvas.width).enumerated().map { tile, columns in
             RoomView.Panel(
-                source: tile, surface: surface,
-                span: SIMD2(Float(columns.lowerBound), Float(columns.upperBound)) / width * 2 - 1,
+                source: .canvas(tile), surface: surface,
+                rect: SurfaceRect(
+                    left: Float(columns.lowerBound) / width * 2 - 1, right: Float(columns.upperBound) / width * 2 - 1,
+                    top: 1, bottom: -1),
                 highlighted: highlighted)
         }
         return RoomView(headRotation: headRotation, tanHalfFov: SIMD2(tanX, tanX * aspect), panels: panels)

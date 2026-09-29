@@ -21,16 +21,22 @@ private let answerTimeout: Float = 0.5  // s
         return attribute(kAXFocusedWindowAttribute, of: element).map { $0 as! AXUIElement }
     }
 
-    /// Every standard window of the apps in the Dock, apart from this app's.
-    static func allWindows() -> [AXUIElement] {
+    /// Every standard window of the apps in the Dock, apart from this app's,
+    /// with its app's bundle identifier.
+    static func allWindows() -> [(window: AXUIElement, bundleID: String?)] {
         let own = ProcessInfo.processInfo.processIdentifier
         return NSWorkspace.shared.runningApplications
             .filter { $0.activationPolicy == .regular && $0.processIdentifier != own }
-            .flatMap { app -> [AXUIElement] in
+            .flatMap { app -> [(window: AXUIElement, bundleID: String?)] in
                 let element = AXUIElementCreateApplication(app.processIdentifier)
                 AXUIElementSetMessagingTimeout(element, answerTimeout)
-                return attribute(kAXWindowsAttribute, of: element) as? [AXUIElement] ?? []
+                let windows = attribute(kAXWindowsAttribute, of: element) as? [AXUIElement] ?? []
+                return windows.map { ($0, app.bundleIdentifier) }
             }
+    }
+
+    static func title(of window: AXUIElement) -> String? {
+        attribute(kAXTitleAttribute, of: window) as? String
     }
 
     /// The window's frame in global points, top-left origin.

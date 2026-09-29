@@ -38,11 +38,15 @@ public struct HudInfo {
     public var prediction: Bool
     public var lastDrift: DriftObservation?
     public var now: Double
+    /// When frames lately reached the display.
+    public var timing: FrameTiming
+    public var latePoseSampling: Bool
 
     public init(
         gaze: SIMD2<Float>?, source: (width: Int, height: Int)?, sourceDescription: String,
         output: (width: Int, height: Int), newFrame: Bool, stats: RenderStats, tracking: TrackingSnapshot,
-        pose: HeadPose, prediction: Bool, lastDrift: DriftObservation?, now: Double
+        pose: HeadPose, prediction: Bool, lastDrift: DriftObservation?, now: Double,
+        timing: FrameTiming = FrameTiming(), latePoseSampling: Bool = false
     ) {
         self.gaze = gaze
         self.source = source
@@ -55,6 +59,8 @@ public struct HudInfo {
         self.prediction = prediction
         self.lastDrift = lastDrift
         self.now = now
+        self.timing = timing
+        self.latePoseSampling = latePoseSampling
     }
 }
 
@@ -94,8 +100,16 @@ public func hudLines(_ info: HudInfo) -> [String] {
     let bias = tracking.gyroBias
     let temperature = tracking.temperature.map { String(format: "  Temp %.1f °C", $0) } ?? ""
 
+    let timing = info.timing
+    let milliseconds = { (seconds: Double?) in seconds.map { String(format: "%.1f ms", $0 * 1000) } ?? "-" }
+    let latency =
+        "Pose to display \(milliseconds(timing.lastLead)), \(milliseconds(timing.extraDelay)) past the promised time, "
+        + String(format: "%.1f late/s", timing.lateFramesPerSecond(now: info.now))
+        + (info.latePoseSampling ? ", pose taken \(milliseconds(timing.workBudget)) before the deadline" : "")
+
     return [
         String(format: "%@, %.0f fps, capture %.0f fps", frameState, info.stats.fps, info.stats.captureFps),
+        latency,
         imu,
         String(format: "Bias %.4f %.4f %.4f", bias.x, bias.y, bias.z) + temperature
             + "  Learned \(tracking.learnedWindows)  " + (tracking.still ? "still" : "moving") + calibration,

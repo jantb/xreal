@@ -6,6 +6,22 @@ public let maxLatencyTrimMs: Float = 40
 /// The flattest curve kept, as a multiple of a screen's distance.
 private let maxCurveRadius: Float = 10
 
+/// How often macOS can draw the canvas, in frames per second. The glasses
+/// still show every one of their own refreshes; this is how often what is on
+/// the canvas can change.
+public let canvasRefreshRates = [60, 90]
+
+/// A window to show above the canvas, found by its app and title.
+public struct PinnedWindow: Equatable, Hashable, Sendable {
+    public var bundleID: String
+    public var title: String
+
+    public init(bundleID: String, title: String) {
+        self.bundleID = bundleID
+        self.title = title
+    }
+}
+
 /// User-tunable settings, persisted between runs as `key=value` lines. Files
 /// written by the old Rust version of the app still load.
 public struct Settings: Equatable, Sendable {
@@ -38,6 +54,22 @@ public struct Settings: Equatable, Sendable {
     /// How many metres a room unit is: the canvas at distance 1 is this far
     /// away. Nearer shows more depth between its parts.
     public var metresPerRoomUnit: Float = 1
+    /// How often macOS draws the canvas; one of `canvasRefreshRates`.
+    public var canvasRefreshRate = 90
+    /// Takes the head pose as late before each frame as the frame's work
+    /// allows, so it has less far to predict.
+    public var latePoseSampling = true
+    /// Shows the glasses' view as a full-screen window in a space of its
+    /// own, which macOS may send to the glasses without compositing.
+    public var fullScreenWindow = false
+    /// Sharpens the canvas where it shows about one pixel per glasses pixel.
+    public var sharpFiltering = true
+    /// Draws the mouse pointer where the mouse is as each frame is drawn,
+    /// instead of where it was when the canvas was captured.
+    public var livePointer = true
+    /// Shows a line of status above the canvas.
+    public var statusStrip = true
+    public var pinnedWindow: PinnedWindow?
 
     public init() {}
 
@@ -93,6 +125,21 @@ public struct Settings: Equatable, Sendable {
                 if let metres = Float(value), metres.isFinite, metres > 0 {
                     settings.metresPerRoomUnit = min(max(metres, 0.25), 20)
                 }
+            case "canvas_refresh_rate":
+                if let rate = Int(value), canvasRefreshRates.contains(rate) {
+                    settings.canvasRefreshRate = rate
+                }
+            case "late_pose_sampling": parse(value, into: &settings.latePoseSampling)
+            case "full_screen_window": parse(value, into: &settings.fullScreenWindow)
+            case "sharp_filtering": parse(value, into: &settings.sharpFiltering)
+            case "live_pointer": parse(value, into: &settings.livePointer)
+            case "status_strip": parse(value, into: &settings.statusStrip)
+            case "pinned_window":
+                // `BUNDLE_ID|TITLE`; a title may hold anything but a line break.
+                let parts = value.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+                if parts.count == 2, !parts[0].isEmpty {
+                    settings.pinnedWindow = PinnedWindow(bundleID: String(parts[0]), title: String(parts[1]))
+                }
             case "curve_radius", "sphere_curve":
                 if let radius = Float(value), radius.isFinite, radius > 0 {
                     settings.curveRadius = min(radius, maxCurveRadius)
@@ -123,14 +170,21 @@ public struct Settings: Equatable, Sendable {
             "curve_radius=\(curveRadius)",
             "lens_correction=\(lensCorrection)",
             "metres_per_room_unit=\(metresPerRoomUnit)",
-        ]
+            "canvas_refresh_rate=\(canvasRefreshRate)",
+            "late_pose_sampling=\(latePoseSampling)",
+            "full_screen_window=\(fullScreenWindow)",
+            "sharp_filtering=\(sharpFiltering)",
+            "live_pointer=\(livePointer)",
+            "status_strip=\(statusStrip)",
+        ] + (pinnedWindow.map { ["pinned_window=\($0.bundleID)|\($0.title.filter { !$0.isNewline })"] } ?? [])
         return lines.map { $0 + "\n" }.joined()
     }
 
-    /// `WIDTHxHEIGHT`, `,curved` for a curved screen, then
+    /// `WIDTHxHEIGHT`, `,2x` for a HiDPI screen, `,curved` for a curved one, then
     /// `@x,y,z,distance` for where it hangs, and `,tilt` if it is tilted.
     private static func serialize(_ screen: RoomScreen) -> String {
-        let size = "\(screen.width)x\(screen.height)" + (screen.curved ? ",curved" : "")
+        let size =
+            "\(screen.width)x\(screen.height)" + (screen.scale == 2 ? ",2x" : "") + (screen.curved ? ",curved" : "")
         let placement = screen.placement
         let d = placement.direction
         return size + "@\(d.x),\(d.y),\(d.z),\(placement.distance)"
@@ -142,9 +196,12 @@ public struct Settings: Equatable, Sendable {
         guard let shape = parts.first?.split(separator: ","), let dimensions = shape.first else { return nil }
         let size = dimensions.split(separator: "x")
         guard size.count == 2, let width = UInt(size[0]).flatMap({ Int(exactly: $0) }),
-            let height = UInt(size[1]).flatMap({ Int(exactly: $0) }), isScreenSize(width, height)
+            let height = UInt(size[1]).flatMap({ Int(exactly: $0) })
         else { return nil }
-        var screen = RoomScreen(width: width, height: height, curved: shape.dropFirst().contains("curved"))
+        let scale = shape.dropFirst().contains("2x") ? 2 : 1
+        guard RoomScreen.isAllowed(width: width, height: height, scale: scale) else { return nil }
+        var screen = RoomScreen(
+            width: width, height: height, scale: scale, curved: shape.dropFirst().contains("curved"))
         if parts.count == 2 {
             let numbers = parts[1].split(separator: ",").compactMap { Float($0) }
             // Written before screens could be tilted: without the tilt.
@@ -155,11 +212,6 @@ public struct Settings: Equatable, Sendable {
             }
         }
         return screen
-    }
-
-    /// Sizes a virtual screen can be created at without upsetting macOS.
-    private static func isScreenSize(_ width: Int, _ height: Int) -> Bool {
-        (1...maxVirtualScreenSide).contains(width) && (1...maxVirtualScreenSide).contains(height)
     }
 
     /// A saved bias that is not a number would otherwise be clamped to the

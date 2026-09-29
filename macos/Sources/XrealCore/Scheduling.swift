@@ -42,3 +42,14 @@ func currentThreadIsRealTime() -> Bool {
     }
     return result == KERN_SUCCESS && isDefault == 0
 }
+
+/// Blocks the calling thread until `time`, in `monotonicNow` time, to well
+/// under a millisecond; returns at once if it has passed.
+public func sleep(until time: Double) {
+    let remaining = time - monotonicNow()
+    guard remaining > 0 else { return }
+    var timebase = mach_timebase_info_data_t()
+    mach_timebase_info(&timebase)
+    let ticks = remaining * 1e9 * Double(timebase.denom) / Double(timebase.numer)
+    mach_wait_until(mach_absolute_time() + UInt64(ticks))
+}

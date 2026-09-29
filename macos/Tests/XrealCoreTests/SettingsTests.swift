@@ -141,3 +141,30 @@ import simd
     #expect(Settings.parse("latency_trim_ms=900\n").latencyTrimMs == maxLatencyTrimMs)
     #expect(Settings.parse("latency_trim_ms=nan\n").latencyTrimMs == 0)
 }
+
+@Test func theNewerViewingChoicesStayChosenAfterARestart() {
+    var settings = Settings()
+    settings.canvas = RoomScreen(width: 2880, height: 1620, scale: 2, curved: true)
+    settings.canvasRefreshRate = 60
+    settings.latePoseSampling = false
+    settings.fullScreenWindow = true
+    settings.sharpFiltering = false
+    settings.livePointer = false
+    settings.statusStrip = false
+    settings.pinnedWindow = PinnedWindow(bundleID: "com.apple.Music", title: "Music | a=b")
+    #expect(Settings.parse(settings.serialize()) == settings)
+}
+
+@Test func aHiDPICanvasTooLargeForMacOSIsSkipped() {
+    let loaded = Settings.parse("canvas=5752x2160,2x,curved@0,0,-1,1\n")
+    #expect(loaded.canvas == Settings().canvas)
+}
+
+@Test func anUnknownRefreshRateFallsBackToTheDefault() {
+    #expect(Settings.parse("canvas_refresh_rate=240\n").canvasRefreshRate == Settings().canvasRefreshRate)
+}
+
+@Test func aCanvasTooLargeToCountIsSkippedRatherThanCrashing() {
+    let loaded = Settings.parse("canvas=9223372036854775807x1,2x@0,0,-1,1\n")
+    #expect(loaded.canvas == Settings().canvas)
+}

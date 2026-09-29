@@ -1,12 +1,10 @@
 import AppKit
 import Carbon.HIToolbox
+import ScreenCaptureKit
 import Synchronization
 import simd
 import XrealCore
 
-// As often as the glasses show a new frame; more is capture work for
-// nothing.
-private let captureFps = 90
 // Parts of the canvas out of view still update this often, so they are
 // fresh enough when the head turns to them.
 private let outOfViewFps = 10
@@ -28,6 +26,15 @@ private let glassesDisplayDelay = 0.007
 // top one (Breezy Desktop uses 8 ms for the Air series).
 private let scanoutTime = 0.008
 private let virtualScreenTimeout = 10.0
+// The pinned window updates this often; it is looked at now and then.
+private let pinnedFps = 30
+// Its capture's longest side, in pixels.
+private let maxPinnedPixels: CGFloat = 4096
+// How often the pinned window is checked for moving, resizing or closing,
+// and the status strip and the pointer's shape brought up to date.
+private let pinnedCheckInterval = 2.0
+private let statusInterval = 1.0
+private let pointerInterval = 1.0 / 15
 // The glasses' refresh rate side by side, which the canvas follows so
 // macOS draws it in step with them.
 let glassesRefreshRate = 90.0
@@ -51,14 +58,17 @@ private let outlineTime = 1.0
 // where they stay this long after.
 private let arrangementSettleTime = 2.0
 
-/// Virtual screen sizes that macOS 27 creates as asked, smallest first: the
-/// sizes the canvas steps through when resized. Nearby standard sizes such
-/// as 3840 × 2160, 5120 × 2880 or 5760 × 2160 are refused or come up
-/// smaller, and so are 5752 × 3240 and 5752 × 4320. 7672 × 2160 wraps about
-/// 170° at the glasses' pixel density; 5752 × 2880 about 125°, and a third
-/// taller; 7672 × 4320 is as wide and twice as tall.
-let canvasSizes: [(width: Int, height: Int)] = [
-    (1920, 1080), (2880, 1620), (5120, 1440), (3832, 2160), (5752, 2160), (5752, 2880), (7672, 2160), (7672, 4320),
+/// Virtual screen sizes that macOS 27 creates as asked, in points, smallest
+/// first, each HiDPI one (scale 2) after its plain twin: the sizes the
+/// canvas steps through when resized. Nearby standard sizes such as 3840 ×
+/// 2160, 5120 × 2880 or 5760 × 2160 are refused or come up smaller, and so
+/// are 5752 × 3240 and 5752 × 4320. 7672 × 2160 wraps about 170° at the
+/// glasses' pixel density; 5752 × 2880 about 125°, and a third taller;
+/// 7672 × 4320 is as wide and twice as tall. The HiDPI ones draw text at
+/// twice the detail, 3840 × 2160 and 5760 × 3240 pixels, filtered down.
+let canvasSizes: [(width: Int, height: Int, scale: Int)] = [
+    (1920, 1080, 1), (1920, 1080, 2), (2880, 1620, 1), (2880, 1620, 2), (5120, 1440, 1), (3832, 2160, 1),
+    (5752, 2160, 1), (5752, 2880, 1), (7672, 2160, 1), (7672, 4320, 1),
 ]
 
 /// What the glasses show, or why they show nothing.
@@ -106,8 +116,24 @@ enum ViewerCommand {
     case moveCanvas(closer: Bool)
     /// Makes the canvas larger (true) or smaller.
     case resizeCanvas(bigger: Bool)
-    case setCanvasSize(width: Int, height: Int)
+    case setCanvasSize(width: Int, height: Int, scale: Int)
+    case setCanvasRefreshRate(Int)
+    case toggleLatePoseSampling
+    case toggleFullScreenWindow
+    case toggleSharpFiltering
+    case toggleLivePointer
+    case toggleStatusStrip
+    case setPinnedWindow(PinnedWindow?)
     case window(WindowCommand)
+}
+
+/// The sizes, in points, of what is shown with the canvas this frame; nil
+/// for what is not there.
+struct ExtraSizes: Sendable {
+    var status: SIMD2<Float>?
+    var pinned: SIMD2<Float>?
+    /// The pointer and its hot spot from its top-left corner.
+    var pointer: (size: SIMD2<Float>, hotSpot: SIMD2<Float>)?
 }
 
 /// What can be done to windows, for `ViewerCommand.window`.
@@ -139,6 +165,10 @@ struct ViewerState: Sendable {
     var canvasBounds: CGRect?
     /// One per capture tile of the canvas, left to right.
     var captures: [LatestFrame] = []
+    /// The pinned window's capture, while there is one.
+    var pinned: LatestFrame?
+    /// When frames reached the display, as of the latest frame.
+    var timing = FrameTiming()
     /// The canvas while carried by the head, and how far away it is.
     var grab: ScreenGrab?
     var grabDistance: Float = 1
@@ -205,19 +235,31 @@ struct ViewerState: Sendable {
     /// Returns whether it changed, so the canvas is created again at its
     /// new size.
     mutating func resizeCanvas(bigger: Bool, now: Double) -> Bool {
-        let area = settings.canvas.width * settings.canvas.height
-        let size =
-            bigger
-            ? canvasSizes.first { $0.width * $0.height > area } : canvasSizes.last { $0.width * $0.height < area }
+        let canvas = settings.canvas
+        let size: (width: Int, height: Int, scale: Int)?
+        if let index = canvasSizes.firstIndex(where: {
+            $0.width == canvas.width && $0.height == canvas.height && $0.scale == canvas.scale
+        }) {
+            let next = bigger ? index + 1 : index - 1
+            size = canvasSizes.indices.contains(next) ? canvasSizes[next] : nil
+        } else {
+            // A size of its own, from an older run: the nearest listed one.
+            let area = canvas.width * canvas.height
+            size =
+                bigger
+                ? canvasSizes.first { $0.width * $0.height > area } : canvasSizes.last { $0.width * $0.height < area }
+        }
         guard let size else { return false }
-        return setCanvasSize(width: size.width, height: size.height, now: now)
+        return setCanvasSize(width: size.width, height: size.height, scale: size.scale, now: now)
     }
 
     /// Returns whether the size changed, so the canvas is created again.
-    mutating func setCanvasSize(width: Int, height: Int, now: Double) -> Bool {
-        guard width != settings.canvas.width || height != settings.canvas.height else { return false }
+    mutating func setCanvasSize(width: Int, height: Int, scale: Int = 1, now: Double) -> Bool {
+        let canvas = settings.canvas
+        guard width != canvas.width || height != canvas.height || scale != canvas.scale else { return false }
         settings.canvas.width = width
         settings.canvas.height = height
+        settings.canvas.scale = scale
         grab = nil
         gaze = nil
         outlineUntil = now + outlineTime
@@ -225,16 +267,19 @@ struct ViewerState: Sendable {
     }
 
     /// Moves on to the frame that reaches the display at `presentingAt`, in
-    /// `monotonicNow` time. `frameSizes` holds the size of the latest frame
-    /// of each capture, and `cursor` is the mouse in global coordinates.
-    /// Returns what to draw, nil until the glasses show side by side, and
-    /// whether the gyro bias changed and should be saved.
+    /// `monotonicNow` time, by the display link's promise; `timing` says how
+    /// much later frames really reach it. `frameSizes` holds the size of the
+    /// latest frame of each capture, `cursor` is the mouse in global
+    /// coordinates and `extras` what else there is to show. Returns what to
+    /// draw, nil until the glasses show side by side, and whether the gyro
+    /// bias changed and should be saved.
     mutating func advance(
         now: Double, dt: Float, presentingAt: Double, snapshot: TrackingSnapshot, captureGeneration: UInt64,
         newFrame: Bool, frameSizes: [(width: Int, height: Int)?], output: (width: Int, height: Int),
-        cursor: CGPoint?
+        cursor: CGPoint?, timing: FrameTiming = FrameTiming(), extras: ExtraSizes = ExtraSizes()
     ) -> (room: RoomView?, biasChanged: Bool) {
         stats.tick(now: now, captureGeneration: captureGeneration)
+        self.timing = timing
         self.snapshot = snapshot
         self.newFrame = newFrame
         self.sourceSize = frameSizes.first ?? nil
@@ -242,7 +287,12 @@ struct ViewerState: Sendable {
 
         let biasChanged = snapshot.biasRevision != biasRevisionSaved
         biasRevisionSaved = snapshot.biasRevision
-        let lead = max(presentingAt - now, 0) + glassesDisplayDelay + Double(settings.latencyTrimMs) / 1000
+        // Predicted for when the frame is really seen: when the display link
+        // promised it, as much later as frames have lately been, and the
+        // glasses' own delay.
+        let lead =
+            max(presentingAt - now, 0) + (timing.extraDelay ?? 0) + glassesDisplayDelay
+            + Double(settings.latencyTrimMs) / 1000
         let pose = settings.prediction ? snapshot.predict(now: now, lead: lead) : snapshot.pose
         lastPose = pose
         if snapshot.session != trackingSession {
@@ -251,7 +301,7 @@ struct ViewerState: Sendable {
             viewport.recenter(pose)
         }
         viewport.track(pose: pose)
-        var room = roomView(now: now, dt: dt, output: output, frameSizes: frameSizes, cursor: cursor)
+        var room = roomView(now: now, dt: dt, output: output, frameSizes: frameSizes, cursor: cursor, extras: extras)
         if settings.prediction {
             let end = snapshot.predict(now: now, lead: lead + scanoutTime)
             let turn = SIMD3(wrapAngle(end.yaw - pose.yaw), end.pitch - pose.pitch, wrapAngle(end.roll - pose.roll))
@@ -264,7 +314,7 @@ struct ViewerState: Sendable {
 
     private mutating func roomView(
         now: Double, dt: Float, output: (width: Int, height: Int), frameSizes: [(width: Int, height: Int)?],
-        cursor: CGPoint?
+        cursor: CGPoint?, extras: ExtraSizes
     ) -> RoomView {
         let rotation = viewport.headRotation
         if let grab {
@@ -298,30 +348,53 @@ struct ViewerState: Sendable {
             return eye
         }
         capturesInView = Array(repeating: false, count: frameSizes.count)
-        for panel in room.panels where panel.source < frameSizes.count && room.shows(panel, margin: inViewMargin) {
-            capturesInView[panel.source] = true
+        for panel in room.panels {
+            if let tile = panel.tile, tile < frameSizes.count, room.shows(panel, margin: inViewMargin) {
+                capturesInView[tile] = true
+            }
         }
         // A canvas still starting up has nothing to show yet.
-        room.panels.removeAll { $0.source >= frameSizes.count || frameSizes[$0.source] == nil }
+        room.panels.removeAll { panel in panel.tile.map { $0 >= frameSizes.count || frameSizes[$0] == nil } ?? false }
+
+        // Above the canvas, on its surface carried on upwards.
+        let surface = canvas.surface(curveRadius: curveRadius)
+        let overhead = overheadLayout(
+            canvas: canvas, strip: settings.statusStrip ? extras.status : nil, pinned: extras.pinned)
+        if let rect = overhead.strip {
+            room.panels.append(RoomView.Panel(source: .status, surface: surface, rect: rect))
+        }
+        if let rect = overhead.pinned {
+            room.panels.append(RoomView.Panel(source: .pinned, surface: surface, rect: rect))
+        }
+        // The pointer last, over everything it lies on.
+        if settings.livePointer, let pointer = extras.pointer, let point = cursor.flatMap(canvasPoint(ofCursor:)) {
+            let rect = pointerRect(canvas: canvas, at: point, size: pointer.size, hotSpot: pointer.hotSpot)
+            room.panels.append(RoomView.Panel(source: .pointer, surface: surface, rect: rect))
+        }
         return room
+    }
+
+    /// Where the mouse at `point`, in global coordinates, is on the canvas,
+    /// in its points from the top-left corner; nil when it is elsewhere.
+    private func canvasPoint(ofCursor point: CGPoint) -> SIMD2<Float>? {
+        guard let bounds = canvasBounds, bounds.contains(point) else { return nil }
+        let canvas = settings.canvas
+        return SIMD2(
+            Float((point.x - bounds.minX) / bounds.width) * Float(canvas.width),
+            Float((point.y - bounds.minY) / bounds.height) * Float(canvas.height))
     }
 
     /// Where the mouse at `point`, in global coordinates, is in the room, if
     /// it is on the canvas.
     private func roomPoint(ofCursor point: CGPoint) -> SIMD3<Float>? {
-        guard let bounds = canvasBounds, bounds.contains(point) else { return nil }
-        let canvas = settings.canvas
-        let pixel = SIMD2(
-            Float((point.x - bounds.minX) / bounds.width) * Float(canvas.width),
-            Float((point.y - bounds.minY) / bounds.height) * Float(canvas.height))
-        return canvas.roomPoint(ofPixel: pixel, curveRadius: settings.curveRadius)
+        canvasPoint(ofCursor: point).map { settings.canvas.roomPoint(ofPixel: $0, curveRadius: settings.curveRadius) }
     }
 
     func hudInfo(now: Double) -> HudInfo {
         HudInfo(
             gaze: gaze, source: sourceSize, sourceDescription: source.diagnosticsDescription, output: output,
             newFrame: newFrame, stats: stats, tracking: snapshot, pose: lastPose, prediction: settings.prediction,
-            lastDrift: lastDrift, now: now)
+            lastDrift: lastDrift, now: now, timing: timing, latePoseSampling: settings.latePoseSampling)
     }
 }
 
@@ -338,6 +411,9 @@ final class FrameLoop: @unchecked Sendable {
     private let shared: SharedState
     private let tracking: Tracking
     private let renderer: Renderer
+    private let status: LatestFrame
+    private let pointer: Guarded<(frame: CapturedFrame?, hotSpot: SIMD2<Float>)>
+    private let timing = Guarded(FrameTiming())
     /// Set before the first frame; called on the display link thread.
     var onBiasChanged: @Sendable () -> Void = {}
     // Touched only on the display link thread.
@@ -347,18 +423,32 @@ final class FrameLoop: @unchecked Sendable {
     private var lastRenderAt = monotonicNow()
     private var lastFreeCursor: CGPoint?
 
-    init(shared: SharedState, tracking: Tracking, renderer: Renderer) {
+    init(
+        shared: SharedState, tracking: Tracking, renderer: Renderer, status: LatestFrame,
+        pointer: Guarded<(frame: CapturedFrame?, hotSpot: SIMD2<Float>)>
+    ) {
         self.shared = shared
         self.tracking = tracking
         self.renderer = renderer
+        self.status = status
+        self.pointer = pointer
     }
 
-    func render(to drawable: CAMetalDrawable, presentingAt: Double) {
+    /// Fills `drawable`, which the display link promises for `presentingAt`
+    /// if it is committed by `deadline`.
+    func render(to drawable: CAMetalDrawable, presentingAt: Double, deadline: Double) {
+        // The later the pose is taken, the less there is to predict: wait
+        // until just enough time is left for the frame's work.
+        if shared.mutex.withLock({ $0.settings.latePoseSampling }) {
+            sleep(until: deadline - timing.mutex.withLock { $0.workBudget })
+        }
         let now = monotonicNow()
         let dt = Float(min(max(now - lastRenderAt, 0), 0.1))
         lastRenderAt = now
 
-        let (captures, fence) = shared.mutex.withLock { ($0.captures, $0.cursorFence) }
+        let (captures, pinned, fence, sharpen) = shared.mutex.withLock {
+            ($0.captures, $0.pinned, $0.cursorFence, $0.settings.sharpFiltering)
+        }
         let ids = captures.map(ObjectIdentifier.init)
         if ids != sources {
             sources = ids
@@ -388,6 +478,18 @@ final class FrameLoop: @unchecked Sendable {
         }
         let output = (width: drawable.texture.width, height: drawable.texture.height)
         let frameSizes = frames.map { frame in frame.map { (width: $0.width, height: $0.height) } }
+        let images = PanelImages(
+            canvas: frames, status: status.current().frame, pinned: pinned?.current().frame,
+            pointer: pointer.mutex.withLock { $0.frame })
+        let hotSpot = pointer.mutex.withLock { $0.hotSpot }
+        func points(_ frame: CapturedFrame) -> SIMD2<Float> {
+            SIMD2(Float(frame.width), Float(frame.height)) / overlayPixelsPerPoint
+        }
+        let extras = ExtraSizes(
+            status: images.status.map(points), pinned: images.pinned.map(points),
+            pointer: images.pointer.map { (points($0), hotSpot) })
+        let timing = self.timing
+        let timingNow = timing.mutex.withLock { $0 }
 
         // Sample the pose as late as possible, just before building the frame.
         let snapshot = tracking.snapshot()
@@ -395,9 +497,19 @@ final class FrameLoop: @unchecked Sendable {
             state.advance(
                 now: now, dt: dt, presentingAt: presentingAt, snapshot: snapshot,
                 captureGeneration: captureGeneration, newFrame: newFrame, frameSizes: frameSizes, output: output,
-                cursor: cursor)
+                cursor: cursor, timing: timingNow, extras: extras)
         }
-        renderer.draw(to: drawable, frames: frames, room: result.room)
+        let period = 1 / glassesRefreshRate
+        drawable.addPresentedHandler { shown in
+            // Zero when the frame was never shown.
+            let at = shown.presentedTime
+            timing.mutex.withLock {
+                $0.presented(promised: presentingAt, at: at > 0 ? at : nil, sampledAt: now, period: period)
+            }
+        }
+        renderer.draw(to: drawable, images: images, room: result.room, sharpen: sharpen) { gpuEnd in
+            timing.mutex.withLock { $0.worked(gpuEnd - now, period: period) }
+        }
         if result.biasChanged {
             onBiasChanged()
         }
@@ -430,7 +542,13 @@ final class FrameLoop: @unchecked Sendable {
     private var hotKeys: [GlobalHotKey] = []
     private var settleTask: Task<Void, Never>?
     private var displaysTask: Task<Void, Never>?
-    private var rateTimer: Timer?
+    private var timers: [Timer] = []
+    private let statusStrip: StatusStrip
+    private let pointerImage: PointerImage
+    private var pinnedCapture: ScreenCapture?
+    /// The window being pinned and its size in points.
+    private var pinnedTarget: (id: CGWindowID, size: CGSize)?
+    private var pinnedTask: Task<Void, Never>?
 
     init(settings: Settings) throws {
         // The viewer needs the glasses as a display of their own.
@@ -443,11 +561,16 @@ final class FrameLoop: @unchecked Sendable {
         self.tracking = tracking
         device = renderer.device
 
-        let frameLoop = FrameLoop(shared: shared, tracking: tracking, renderer: renderer)
-        displayLink = DisplayLinkThread { drawable, presentingAt in
-            frameLoop.render(to: drawable, presentingAt: presentingAt)
+        statusStrip = StatusStrip(device: renderer.device)
+        pointerImage = PointerImage(device: renderer.device)
+        let frameLoop = FrameLoop(
+            shared: shared, tracking: tracking, renderer: renderer, status: statusStrip.latest,
+            pointer: pointerImage.latest)
+        displayLink = DisplayLinkThread { drawable, presentingAt, deadline in
+            frameLoop.render(to: drawable, presentingAt: presentingAt, deadline: deadline)
         }
         window = GlassesWindow(device: renderer.device, displayLink: displayLink)
+        window.fullScreen = settings.fullScreenWindow
         frameLoop.onBiasChanged = { [weak self] in Task { @MainActor in self?.saveSettings() } }
 
         window.view.onKey = { [unowned self] event in handleKey(event) }
@@ -473,15 +596,24 @@ final class FrameLoop: @unchecked Sendable {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.screensChanged() }
         }
-        let timer = Timer(timeInterval: captureRateInterval, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.updateCaptureRates() }
+        func every(_ interval: Double, _ action: @escaping @MainActor (Viewer) -> Void) -> Timer {
+            let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { if let self { action(self) } }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            return timer
         }
-        RunLoop.main.add(timer, forMode: .common)
-        rateTimer = timer
+        timers = [
+            every(captureRateInterval) { $0.updateCaptureRates() },
+            every(statusInterval) { $0.updateStatusStrip() },
+            every(pointerInterval) { $0.updatePointer() },
+            every(pinnedCheckInterval) { $0.checkPinnedWindow() },
+        ]
 
         // The window shows once the source starts, if the glasses are there.
         updateCursorFence()
         startSource()
+        restartPinned()
     }
 
     /// The settings and view as they are now, for the menu.
@@ -517,6 +649,7 @@ final class FrameLoop: @unchecked Sendable {
     func perform(_ command: ViewerCommand) {
         var persist = true
         var restartSource = false
+        var repin = false
         if case .window(let windowCommand) = command {
             controlWindows(windowCommand)
             return
@@ -554,9 +687,27 @@ final class FrameLoop: @unchecked Sendable {
             case .resizeCanvas(let bigger):
                 restartSource = state.resizeCanvas(bigger: bigger, now: monotonicNow())
                 persist = restartSource
-            case .setCanvasSize(let width, let height):
-                restartSource = state.setCanvasSize(width: width, height: height, now: monotonicNow())
+            case .setCanvasSize(let width, let height, let scale):
+                restartSource = state.setCanvasSize(width: width, height: height, scale: scale, now: monotonicNow())
                 persist = restartSource
+            case .setCanvasRefreshRate(let rate):
+                restartSource = canvasRefreshRates.contains(rate) && rate != state.settings.canvasRefreshRate
+                if restartSource {
+                    state.settings.canvasRefreshRate = rate
+                }
+                persist = restartSource
+            case .toggleLatePoseSampling: state.settings.latePoseSampling.toggle()
+            case .toggleFullScreenWindow: state.settings.fullScreenWindow.toggle()
+            case .toggleSharpFiltering: state.settings.sharpFiltering.toggle()
+            case .toggleLivePointer:
+                // The captures leave the pointer out while it is drawn live.
+                state.settings.livePointer.toggle()
+                restartSource = true
+            case .toggleStatusStrip: state.settings.statusStrip.toggle()
+            case .setPinnedWindow(let pinned):
+                repin = pinned != state.settings.pinnedWindow
+                state.settings.pinnedWindow = pinned
+                persist = repin
             case .window:
                 break
             }
@@ -567,6 +718,22 @@ final class FrameLoop: @unchecked Sendable {
         if restartSource {
             startSource()
         }
+        if repin {
+            restartPinned()
+        }
+        switch command {
+        case .toggleFullScreenWindow:
+            window.fullScreen = shared.mutex.withLock { $0.settings.fullScreenWindow }
+            window.place()
+        case .toggleStatusStrip: updateStatusStrip()
+        case .toggleLivePointer: updatePointer()
+        default: break
+        }
+    }
+
+    /// Windows that can be pinned above the canvas, for the controls.
+    func pinnableWindows() async -> [PinnableWindow] {
+        await ScreenCapture.pinnableWindows()
     }
 
     private func screensChanged() {
@@ -580,6 +747,7 @@ final class FrameLoop: @unchecked Sendable {
             glassesConnected = connected
             eprint(connected ? "The glasses are connected" : "The glasses were disconnected")
             startSource()
+            restartPinned()
         }
         window.place()
         updateCanvasBounds()
@@ -680,13 +848,13 @@ final class FrameLoop: @unchecked Sendable {
 
     /// Captures of parts of the canvas out of view update less often.
     private func updateCaptureRates() {
-        let inView = shared.mutex.withLock { $0.capturesInView }
+        let (inView, fullFps) = shared.mutex.withLock { ($0.capturesInView, $0.settings.canvasRefreshRate) }
         let now = monotonicNow()
         for (index, capture) in captures.enumerated() where capture.fps != 0 {
             if index >= inView.count || inView[index] {
                 lastInView[index] = now
             }
-            let fps = now - lastInView[index] < inViewHold ? captureFps : outOfViewFps
+            let fps = now - lastInView[index] < inViewHold ? fullFps : outOfViewFps
             if capture.fps != fps {
                 Task { await capture.setFps(fps) }
             }
@@ -742,10 +910,16 @@ final class FrameLoop: @unchecked Sendable {
         guard let glasses = Displays.glassesDisplay(), let canvasScreen else { return }
         let target = CGDisplayBounds(canvasScreen.displayID)
         let hidden = CGDisplayBounds(glasses)
+        // The pinned window may sit there on purpose, out of the way: it
+        // shows above the canvas all the same.
+        let pinned = shared.mutex.withLock { $0.settings.pinnedWindow }
         var step: CGFloat = 0
-        for window in WindowControl.allWindows() {
+        for (window, bundleID) in WindowControl.allWindows() {
             guard let frame = WindowControl.frame(of: window), hidden.contains(CGPoint(x: frame.midX, y: frame.midY))
             else { continue }
+            if let pinned, bundleID == pinned.bundleID, WindowControl.title(of: window) == pinned.title {
+                continue
+            }
             let middle = CGPoint(x: target.midX + step, y: target.midY + step)
             WindowControl.move(window, to: windowOrigin(size: frame.size, centeredOn: middle, within: target))
             step += gatherStep
@@ -782,11 +956,19 @@ final class FrameLoop: @unchecked Sendable {
             return
         }
         window.show()
-        let canvas = shared.mutex.withLock { $0.settings.canvas }
+        let (canvas, rate, livePointer) = shared.mutex.withLock {
+            ($0.settings.canvas, $0.settings.canvasRefreshRate, $0.settings.livePointer)
+        }
         setSource(.creatingCanvas, captures: [])
-        // A canvas of the same size is kept, so it stays put.
-        if canvasScreen.map({ $0.width != canvas.width || $0.height != canvas.height }) ?? true {
-            canvasScreen = VirtualScreen(index: 0, width: canvas.width, height: canvas.height, refreshRate: glassesRefreshRate)
+        // A canvas of the same size and rate is kept, so it stays put.
+        if canvasScreen.map({
+            $0.width != canvas.width || $0.height != canvas.height || $0.scale != canvas.scale
+                || $0.refreshRate != Double(rate)
+        }) ?? true {
+            // The old one goes first: the new one may have the same identity.
+            canvasScreen = nil
+            canvasScreen = VirtualScreen(
+                index: 0, width: canvas.width, height: canvas.height, scale: canvas.scale, refreshRate: Double(rate))
         }
         guard let screen = canvasScreen else {
             setSource(.refused, captures: [])
@@ -795,16 +977,21 @@ final class FrameLoop: @unchecked Sendable {
         let frame = await ScreenCapture.shareableFrame(of: screen.displayID, timeout: virtualScreenTimeout)
         guard !Task.isCancelled else { return }
         arrangeCanvas()
+        // Looked up once for every tile.
+        let content = try? await ScreenCapture.content()
+        guard !Task.isCancelled else { return }
 
         var started: [ScreenCapture] = []
         var problems: [String] = []
         // A wide canvas is captured in tiles, so the parts out of view can
-        // update less often.
+        // update less often. Tiles are laid out in points and captured at
+        // the screen's own pixels.
         for columns in captureTiles(width: screen.width) {
             let tile = CGRect(x: columns.lowerBound, y: 0, width: columns.count, height: screen.height)
             let (capture, problem) = await startCapture(
-                displayID: screen.displayID, pixelSize: (columns.count, screen.height),
-                sourceRect: screen.width == columns.count ? nil : tile)
+                displayID: screen.displayID, content: content,
+                pixelSize: (columns.count * screen.scale, screen.height * screen.scale),
+                sourceRect: screen.width == columns.count ? nil : tile, fps: rate, showsCursor: !livePointer)
             started.append(capture)
             guard !Task.isCancelled else {
                 // A newer source took over; these never reached it.
@@ -829,14 +1016,16 @@ final class FrameLoop: @unchecked Sendable {
     /// capture is returned even when it fails, so captures stay in step with
     /// the tiles; the second value then says what went wrong.
     private func startCapture(
-        displayID: CGDirectDisplayID, pixelSize: (width: Int, height: Int), sourceRect: CGRect? = nil
+        displayID: CGDirectDisplayID, content: SCShareableContent?, pixelSize: (width: Int, height: Int),
+        sourceRect: CGRect?, fps: Int, showsCursor: Bool
     ) async -> (ScreenCapture, String?) {
         do {
             let capture = try ScreenCapture(device: device)
             do {
+                guard let content else { throw CaptureError.displayNotShareable }
                 try await capture.start(
-                    displayID: displayID, pixelSize: pixelSize, sourceRect: sourceRect, fps: captureFps,
-                    excludedWindowID: window.windowID)
+                    displayID: displayID, in: content, pixelSize: pixelSize, sourceRect: sourceRect, fps: fps,
+                    showsCursor: showsCursor, excludedWindowID: window.windowID)
                 return (capture, nil)
             } catch {
                 let permission = CGPreflightScreenCaptureAccess() ? "" : " - allow Screen Recording and relaunch"
@@ -846,6 +1035,93 @@ final class FrameLoop: @unchecked Sendable {
         } catch {
             fatalError("Could not create a Metal texture cache: \(error)")
         }
+    }
+
+    // MARK: Above the canvas
+
+    private func updateStatusStrip() {
+        let (enabled, info) = shared.mutex.withLock { ($0.settings.statusStrip, $0.hudInfo(now: monotonicNow())) }
+        guard enabled, glassesConnected else {
+            statusStrip.show(nil)
+            return
+        }
+        let tracking = info.tracking
+        let readings = StatusReadings(
+            clock: Date.now.formatted(date: .omitted, time: .shortened), battery: Battery.now(),
+            cpuLoad: statusStrip.cpuLoad(), memory: MemoryUse.now(), glassesTemperature: tracking.temperature,
+            trackingHz: tracking.status == .connected ? tracking.sampleRateHz : nil, fps: info.stats.fps,
+            latency: info.timing.lastLead.map { $0 + glassesDisplayDelay },
+            lateFramesPerSecond: info.timing.lateFramesPerSecond(now: info.now))
+        statusStrip.show(statusItems(readings))
+    }
+
+    private func updatePointer() {
+        guard glassesConnected, shared.mutex.withLock({ $0.settings.livePointer }) else {
+            pointerImage.hide()
+            return
+        }
+        pointerImage.update()
+    }
+
+    private func restartPinned() {
+        pinnedTask?.cancel()
+        pinnedTask = Task { await switchPinned() }
+    }
+
+    /// Captures the pinned window, if there is one to show.
+    private func switchPinned() async {
+        if let old = pinnedCapture {
+            pinnedCapture = nil
+            await old.stop()
+        }
+        pinnedTarget = nil
+        shared.mutex.withLock { $0.pinned = nil }
+        guard let wanted = shared.mutex.withLock({ $0.settings.pinnedWindow }), Displays.glassesDisplay() != nil,
+            let content = try? await ScreenCapture.content(), !Task.isCancelled,
+            let found = ScreenCapture.find(wanted, in: content)
+        else { return }
+        do {
+            let capture = try ScreenCapture(device: device)
+            try await capture.start(window: found, pixelSize: Self.pinnedPixels(found.frame.size), fps: pinnedFps)
+            guard !Task.isCancelled else {
+                await capture.stop()
+                return
+            }
+            pinnedCapture = capture
+            pinnedTarget = (found.windowID, found.frame.size)
+            shared.mutex.withLock { $0.pinned = capture.latest }
+        } catch {
+            eprint("Could not capture the pinned window: \(error.localizedDescription)")
+        }
+    }
+
+    /// Follows the pinned window as it is resized, and finds it again once
+    /// it is closed and opened again.
+    private func checkPinnedWindow() {
+        guard shared.mutex.withLock({ $0.settings.pinnedWindow }) != nil, glassesConnected else { return }
+        guard let target = pinnedTarget, let capture = pinnedCapture else {
+            restartPinned()
+            return
+        }
+        let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], target.id) as? [[String: Any]]
+        guard let bounds = info?.first?[kCGWindowBounds as String] as? NSDictionary,
+            let frame = CGRect(dictionaryRepresentation: bounds)
+        else {
+            restartPinned()
+            return
+        }
+        if frame.size != target.size {
+            pinnedTarget = (target.id, frame.size)
+            Task { await capture.setPixelSize(Self.pinnedPixels(frame.size)) }
+        }
+    }
+
+    /// Pixels to capture a window `size` points large at, as crisp as the
+    /// rest of what is drawn with the canvas.
+    private static func pinnedPixels(_ size: CGSize) -> (width: Int, height: Int) {
+        let scale = CGFloat(overlayPixelsPerPoint)
+        let fit = min(1, maxPinnedPixels / max(size.width * scale, size.height * scale, 1))
+        return (max(Int(size.width * scale * fit), 1), max(Int(size.height * scale * fit), 1))
     }
 
     // MARK: Keys

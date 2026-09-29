@@ -1,3 +1,4 @@
+import CoreGraphics
 import Testing
 import XrealCore
 import simd
@@ -24,12 +25,13 @@ extension ViewerState {
     /// One frame with the head as `snapshot` says.
     @discardableResult
     fileprivate mutating func frame(
-        _ head: TrackingSnapshot = headAt(), sizes: [Size?] = tileSizes, output: Size = sideBySide
+        _ head: TrackingSnapshot = headAt(), sizes: [Size?] = tileSizes, output: Size = sideBySide,
+        now: Double = monotonicNow(), cursor: CGPoint? = nil, timing: FrameTiming = FrameTiming(),
+        extras: ExtraSizes = ExtraSizes()
     ) -> (room: RoomView?, biasChanged: Bool) {
-        let now = monotonicNow()
-        return advance(
+        advance(
             now: now, dt: 1 / 90, presentingAt: now + 1 / 90, snapshot: head, captureGeneration: 0,
-            newFrame: false, frameSizes: sizes, output: output, cursor: nil)
+            newFrame: false, frameSizes: sizes, output: output, cursor: cursor, timing: timing, extras: extras)
     }
 }
 
@@ -150,10 +152,12 @@ private func freshState() -> ViewerState {
     _ = state.setCanvasSize(width: canvasSizes[0].width, height: canvasSizes[0].height, now: 0)
     var visited = [canvasSizes[0]]
     while state.resizeCanvas(bigger: true, now: 0) {
-        visited.append((state.settings.canvas.width, state.settings.canvas.height))
+        let canvas = state.settings.canvas
+        visited.append((canvas.width, canvas.height, canvas.scale))
     }
     #expect(visited.map(\.width) == canvasSizes.map(\.width))
     #expect(visited.map(\.height) == canvasSizes.map(\.height))
+    #expect(visited.map(\.scale) == canvasSizes.map(\.scale))
     let outcome9 = state.resizeCanvas(bigger: true, now: 0)
     #expect(!outcome9)
 }
@@ -179,4 +183,61 @@ private func freshState() -> ViewerState {
     #expect(outcome13)
     #expect(state.grab == nil)
     #expect(state.gaze == nil)
+}
+
+/// How far left the view looks after a quick turn left, predicted with
+/// frames lately reaching the display `late` seconds after they were promised.
+private func turnSeen(framesLate late: Double) throws -> Float {
+    var state = freshState()
+    let now = monotonicNow()
+    var still = headAt()
+    still.status = .connected
+    still.sampledAt = now
+    state.frame(still, now: now)
+    var turning = still
+    turning.yawRate = 2
+    var timing = FrameTiming()
+    for index in 0..<30 {
+        let promised = now - 1 + Double(index) / 90
+        timing.presented(promised: promised, at: promised + late, sampledAt: promised - 0.01, period: 1 / 90)
+    }
+    let room = try #require(state.frame(turning, now: now, timing: timing).room)
+    return -(room.headRotation * SIMD3(0, 0, -1)).x
+}
+
+@Test func thePoseIsPredictedForWhenFramesReallyReachTheGlasses() throws {
+    let onTime = try turnSeen(framesLate: 0)
+    let late = try turnSeen(framesLate: 0.02)
+    #expect(onTime > 0)
+    // 20 ms more at 2 rad/s is 0.04 rad further round.
+    #expect(abs(asin(late) - asin(onTime) - 0.04) < 0.005)
+}
+
+@Test func theStatusStripAndPinnedWindowHangAboveTheCanvas() throws {
+    var state = freshState()
+    let extras = ExtraSizes(status: SIMD2(1200, 36), pinned: SIMD2(800, 600))
+    let room = try #require(state.frame(extras: extras).room)
+    let status = try #require(room.panels.first { $0.source == .status })
+    let pinned = try #require(room.panels.first { $0.source == .pinned })
+    #expect(status.rect.bottom > 1 && pinned.rect.bottom > status.rect.top)
+
+    state.settings.statusStrip = false
+    let without = try #require(state.frame(extras: extras).room)
+    #expect(!without.panels.contains { $0.source == .status })
+    #expect(without.panels.contains { $0.source == .pinned })
+}
+
+@Test func thePointerIsDrawnLiveOnlyWhileTheMouseIsOnTheCanvas() throws {
+    var state = freshState()
+    let canvas = state.settings.canvas
+    state.canvasBounds = CGRect(x: 0, y: 0, width: canvas.width, height: canvas.height)
+    let extras = ExtraSizes(pointer: (SIMD2(32, 32), SIMD2(4, 4)))
+    func drawsPointer(at cursor: CGPoint?) throws -> Bool {
+        try #require(state.frame(cursor: cursor, extras: extras).room).panels.contains { $0.source == .pointer }
+    }
+    #expect(try drawsPointer(at: CGPoint(x: 2800, y: 1000)))
+    #expect(try !drawsPointer(at: CGPoint(x: -300, y: 1000)))
+    #expect(try !drawsPointer(at: nil))
+    state.settings.livePointer = false
+    #expect(try !drawsPointer(at: CGPoint(x: 2800, y: 1000)))
 }

@@ -47,6 +47,22 @@ Global shortcuts (⌃⌥⌘ plus a key):
 | F | Fit the focused window to the zone you look at |
 | M | Move the pointer to where you look |
 
+Above the canvas, where you see it by looking up, hang a status line (clock,
+battery, CPU, memory, the glasses' temperature, head tracking, frame rate and
+latency) and, if you pick one in the controls, a pinned window from any app.
+The pinned window can stay anywhere, even on the glasses' own display behind
+the view.
+
+## Latency
+
+The viewer measures when each frame really reaches the glasses and predicts
+the head pose for that moment; the latency and late frames per second are in
+**Controls… > Diagnostics** and on the status line. It also waits to read the
+pose until just before each frame's deadline (**Take Head Pose Late**). Two
+switches are there to compare by those numbers: a 60 Hz canvas, which leaves
+the GPU more room, and the experimental **Full-Screen Glasses Window**, which
+may let macOS skip compositing (it needs "Displays have separate Spaces").
+
 ## Layout
 
 - `macos/Sources/XrealCore`: glasses protocol and IMU, head tracking and gyro
@@ -66,10 +82,13 @@ Diagnostic commands: `--probe`, `--probe-sizes`, `--probe-mode`, `--dump-config`
 
 - **Never create virtual displays wider or taller than 8192 px.** Doing so
   panicked a Mac. `maxVirtualScreenSide` enforces it, and `canvasSizes` lists
-  the sizes macOS 27 gives as asked. Other standard sizes are refused or come
-  up smaller.
+  the sizes macOS 27 gives as asked, in points; the HiDPI ones (scale 2) have
+  twice the pixels each way. Other standard sizes are refused or come up
+  smaller. `--probe-sizes 1920x1080@2x` probes a HiDPI size.
 - Quitting (or `kill`) puts the glasses back to their own picture. A crash
   leaves them side by side until they are replugged; `--probe-mode 11`
   switches them back.
 - The Air 2's temple buttons never reach the host, so there are no button
   features.
+- The live pointer is drawn from the system's current pointer image; macOS no
+  longer says when an app hides it while you type, so it stays visible.

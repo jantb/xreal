@@ -63,6 +63,8 @@ struct Headline {
     private(set) var source: SourceStatus
     private(set) var screenRecordingAllowed = true
     private(set) var windowControlAllowed = true
+    /// Windows that can be pinned above the canvas, as last looked up.
+    private(set) var pinnableWindows: [PinnableWindow] = []
 
     init(viewer: Viewer) {
         self.viewer = viewer
@@ -96,6 +98,12 @@ struct Headline {
             set: { if $0 != self[keyPath: value] { self.perform(command) } })
     }
 
+    func refreshPinnableWindows() {
+        Task {
+            pinnableWindows = await viewer.pinnableWindows()
+        }
+    }
+
     func askForWindowControl() {
         _ = WindowControl.allowed(prompt: true)
         refresh()
@@ -116,6 +124,7 @@ struct Headline {
         let window = window ?? makeWindow()
         self.window = window
         model.refresh()
+        model.refreshPinnableWindows()
         if timer == nil {
             let timer = Timer(timeInterval: refreshInterval, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.model.refresh() }
@@ -154,6 +163,7 @@ private struct ControlView: View {
         Form {
             StatusSection(model: model)
             CanvasSection(model: model)
+            AboveCanvasSection(model: model)
             ViewSection(model: model)
             TrackingSection(model: model)
             WindowsSection(model: model)
@@ -200,23 +210,39 @@ private struct CanvasSection: View {
     private struct Size: Hashable {
         var width: Int
         var height: Int
+        var scale: Int
     }
 
     var body: some View {
         let settings = model.settings
-        let current = Size(width: settings.canvas.width, height: settings.canvas.height)
-        let sizes = canvasSizes.map { Size(width: $0.width, height: $0.height) }
+        let current = Size(width: settings.canvas.width, height: settings.canvas.height, scale: settings.canvas.scale)
+        let sizes = canvasSizes.map { Size(width: $0.width, height: $0.height, scale: $0.scale) }
         Section("Canvas") {
             Picker(
                 "Size",
                 selection: Binding(
                     get: { current },
-                    set: { model.perform(.setCanvasSize(width: $0.width, height: $0.height)) })
+                    set: { model.perform(.setCanvasSize(width: $0.width, height: $0.height, scale: $0.scale)) })
             ) {
                 ForEach(sizes.contains(current) ? sizes : sizes + [current], id: \.self) { size in
-                    Text(verbatim: "\(size.width) × \(size.height)").tag(size)
+                    Text(verbatim: "\(size.width) × \(size.height)" + (size.scale == 2 ? " HiDPI" : "")).tag(size)
                 }
             }
+            if settings.canvas.scale == 2 {
+                Text("HiDPI draws text at twice the detail and filters it down: sharper, but less fits on the canvas.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Picker(
+                "Refresh Rate",
+                selection: Binding(
+                    get: { settings.canvasRefreshRate }, set: { model.perform(.setCanvasRefreshRate($0)) })
+            ) {
+                ForEach(canvasRefreshRates, id: \.self) { rate in Text(verbatim: "\(rate) Hz").tag(rate) }
+            }
+            Text(
+                "How often what is on the canvas can change. Head movement is drawn at the glasses' own rate either way; 60 Hz leaves the GPU more room."
+            )
+            .font(.caption).foregroundStyle(.secondary)
             Toggle("Curved", isOn: model.toggle(\.settings.canvas.curved, .toggleCurved))
             VStack(alignment: .leading) {
                 LabeledContent("Curve") {
@@ -265,12 +291,64 @@ private struct ViewSection: View {
                     value: Binding(
                         get: { model.settings.latencyTrimMs }, set: { model.perform(.setLatencyTrim($0)) }),
                     in: 0...maxLatencyTrimMs, step: 1)
-                Text("Raise it if the canvas trails behind quick head turns, lower it if it overshoots.")
+                Text(
+                    "On top of the delay the viewer measures itself. Raise it if the canvas trails behind quick head turns, lower it if it overshoots."
+                )
                     .font(.caption).foregroundStyle(.secondary)
             }
             .disabled(!model.settings.prediction)
+            Toggle("Take Head Pose Late", isOn: model.toggle(\.settings.latePoseSampling, .toggleLatePoseSampling))
+                .disabled(!model.settings.prediction)
+            Toggle("Draw Pointer Live", isOn: model.toggle(\.settings.livePointer, .toggleLivePointer))
             Toggle("Zoom Out to Show Cursor", isOn: model.toggle(\.settings.followCursor, .toggleFollowCursor))
+            Toggle("Sharpen Text", isOn: model.toggle(\.settings.sharpFiltering, .toggleSharpFiltering))
             Toggle("Correct Lens Distortion", isOn: model.toggle(\.settings.lensCorrection, .toggleLensCorrection))
+            VStack(alignment: .leading) {
+                Toggle(
+                    "Full-Screen Glasses Window", isOn: model.toggle(\.settings.fullScreenWindow, .toggleFullScreenWindow))
+                Text(
+                    NSScreen.screensHaveSeparateSpaces
+                        ? "Experimental: may let macOS skip compositing and show frames sooner. Watch the latency in Diagnostics."
+                        : "Needs “Displays have separate Spaces” in Desktop & Dock settings."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct AboveCanvasSection: View {
+    let model: ControlModel
+
+    var body: some View {
+        let pinned = model.settings.pinnedWindow
+        let windows = model.pinnableWindows.map(\.window)
+        Section("Above the Canvas") {
+            Toggle("Status Line", isOn: model.toggle(\.settings.statusStrip, .toggleStatusStrip))
+            HStack {
+                Picker(
+                    "Pinned Window",
+                    selection: Binding(get: { pinned }, set: { model.perform(.setPinnedWindow($0)) })
+                ) {
+                    Text("None").tag(PinnedWindow?.none)
+                    if let pinned, !windows.contains(pinned) {
+                        Text(verbatim: pinned.title.isEmpty ? pinned.bundleID : pinned.title).tag(PinnedWindow?.some(pinned))
+                    }
+                    ForEach(model.pinnableWindows, id: \.self) { choice in
+                        Text(verbatim: choice.label).tag(PinnedWindow?.some(choice.window))
+                    }
+                }
+                Button {
+                    model.refreshPinnableWindows()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Look for windows again")
+            }
+            Text(
+                "Look up to see them. The pinned window can stay anywhere, even on the glasses' own display behind the view."
+            )
+            .font(.caption).foregroundStyle(.secondary)
         }
     }
 }

@@ -5,16 +5,16 @@ import ScreenCaptureKit
 import Synchronization
 import XrealCore
 
-/// A captured screen image as a Metal texture over ScreenCaptureKit's
-/// IOSurface, so nothing is copied.
+/// An image to draw: a captured screen image as a Metal texture over
+/// ScreenCaptureKit's IOSurface, so nothing is copied, or one the app made.
 final class CapturedFrame: @unchecked Sendable {
     let texture: MTLTexture
     let width: Int
     let height: Int
     // Keeps the IOSurface out of ScreenCaptureKit's reuse pool while in use.
-    private let backing: CVMetalTexture
+    private let backing: CVMetalTexture?
 
-    init(texture: MTLTexture, backing: CVMetalTexture) {
+    init(texture: MTLTexture, backing: CVMetalTexture? = nil) {
         self.texture = texture
         self.backing = backing
         width = texture.width
@@ -52,7 +52,8 @@ enum CaptureError: LocalizedError {
     }
 }
 
-/// Streams one display through ScreenCaptureKit into `latest`.
+/// Streams one display, or one window, through ScreenCaptureKit into
+/// `latest`.
 final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     let latest = LatestFrame()
     private let queue = DispatchQueue(label: "xreal.capture", qos: .userInteractive)
@@ -68,22 +69,55 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         textureCache = cache
     }
 
-    /// Captures `displayID` at `pixelSize`, leaving out the window with
-    /// `excludedWindowID` so the viewer never captures itself. The app's
-    /// other windows, such as its menu bar menu, stay in the picture.
-    /// `sourceRect`, in the display's points, captures only that part of it.
+    /// What there is to capture now.
+    static func content() async throws -> SCShareableContent {
+        try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+    }
+
+    /// Captures `displayID` from `content` at `pixelSize`, leaving out the
+    /// window with `excludedWindowID` so the viewer never captures itself.
+    /// The app's other windows, such as its menu bar menu, stay in the
+    /// picture. `sourceRect`, in the display's points, captures only that
+    /// part of it.
     @MainActor func start(
-        displayID: CGDirectDisplayID, pixelSize: (width: Int, height: Int), sourceRect: CGRect? = nil, fps: Int,
-        excludedWindowID: CGWindowID
+        displayID: CGDirectDisplayID, in content: SCShareableContent, pixelSize: (width: Int, height: Int),
+        sourceRect: CGRect? = nil, fps: Int, showsCursor: Bool, excludedWindowID: CGWindowID
     ) async throws {
-        await stop()
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
             throw CaptureError.displayNotShareable
         }
         let viewerWindow = content.windows.filter { $0.windowID == excludedWindowID }
-        let filter = SCContentFilter(display: display, excludingWindows: viewerWindow)
+        let configuration = Self.configuration(pixelSize: pixelSize, fps: fps, showsCursor: showsCursor)
+        if let sourceRect {
+            configuration.sourceRect = sourceRect
+        }
+        try await start(
+            filter: SCContentFilter(display: display, excludingWindows: viewerWindow), configuration: configuration)
+    }
 
+    /// Captures just `window`, wherever it is and whatever covers it, at
+    /// `pixelSize`.
+    @MainActor func start(window: SCWindow, pixelSize: (width: Int, height: Int), fps: Int) async throws {
+        let configuration = Self.configuration(pixelSize: pixelSize, fps: fps, showsCursor: false)
+        configuration.ignoreShadowsSingleWindow = true
+        try await start(filter: SCContentFilter(desktopIndependentWindow: window), configuration: configuration)
+    }
+
+    /// Captures at `pixelSize` from now on.
+    @MainActor func setPixelSize(_ pixelSize: (width: Int, height: Int)) async {
+        guard let stream, let configuration else { return }
+        configuration.width = pixelSize.width
+        configuration.height = pixelSize.height
+        do {
+            try await stream.updateConfiguration(configuration)
+        } catch {
+            eprint("Could not change the capture size: \(error.localizedDescription)")
+        }
+    }
+
+    private static func configuration(pixelSize: (width: Int, height: Int), fps: Int, showsCursor: Bool)
+        -> SCStreamConfiguration
+    {
         let configuration = SCStreamConfiguration()
         configuration.width = pixelSize.width
         configuration.height = pixelSize.height
@@ -91,17 +125,18 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.colorSpaceName = CGColorSpace.sRGB
         configuration.queueDepth = 4
-        configuration.showsCursor = true
-        if let sourceRect {
-            configuration.sourceRect = sourceRect
-        }
+        configuration.showsCursor = showsCursor
+        return configuration
+    }
 
+    @MainActor private func start(filter: SCContentFilter, configuration: SCStreamConfiguration) async throws {
+        await stop()
         let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await newStream.startCapture()
         stream = newStream
         self.configuration = configuration
-        self.fps = fps
+        fps = Int(configuration.minimumFrameInterval.timescale)
     }
 
     /// Changes how often frames are captured, while capturing.

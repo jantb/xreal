@@ -302,3 +302,28 @@ func lookingAtATiltedScreenFindsThePixelThere(curved: Bool) throws {
     settings.canvas.placement.tilt = 0
     #expect(Settings.parse(settings.serialize()).canvas.placement.tilt == 0)
 }
+
+@Test func aCurvedScreenPutAnywhereLooksAsItDoesStraightAheadWhenFaced() {
+    let placements = [
+        ScreenPlacement(direction: SIMD3(0, sin(0.5), -cos(0.5))),
+        ScreenPlacement(direction: SIMD3(0.6, -0.4, -0.7), tilt: 0.3),
+        ScreenPlacement(direction: SIMD3(-1, 0.2, 0), distance: 1.4, tilt: -0.2),
+    ]
+    for placement in placements {
+        var screen = RoomScreen(width: 5752, height: 2160, curved: true)
+        screen.placement = placement
+        let moved = screen.surface()
+        screen.placement = ScreenPlacement(direction: SIMD3(0, 0, -1), distance: placement.distance)
+        let ahead = screen.surface()
+        let middle = (ahead.point(at: .zero), moved.point(at: .zero))
+        // The same distance to every point, and between each point and the
+        // middle, as straight ahead: the same shape, only turned.
+        for x in [Float(-1), -0.4, 0.5, 1] {
+            for y in [Float(-1), 0, 1] {
+                let (a, b) = (ahead.point(at: SIMD2(x, y)), moved.point(at: SIMD2(x, y)))
+                #expect(abs(simd_length(a) - simd_length(b)) < 1e-4, "x \(x) y \(y)")
+                #expect(abs(simd_distance(a, middle.0) - simd_distance(b, middle.1)) < 1e-4, "x \(x) y \(y)")
+            }
+        }
+    }
+}

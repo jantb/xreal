@@ -3,16 +3,16 @@ import QuartzCore
 import XrealCore
 
 /// Runs a CAMetalDisplayLink on a dedicated high-priority thread and calls
-/// `onFrame` there once per refresh, with the drawable to fill and the time
-/// it will reach the screen. Frames keep coming while the main thread is
+/// `onFrame` there once per refresh, with the drawable to fill, the time it
+/// will reach the screen and the time it must be committed by. Frames keep coming while the main thread is
 /// busy with menus, window moves or other AppKit work.
 final class DisplayLinkThread: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendable {
-    private let onFrame: (CAMetalDrawable, _ presentingAt: Double) -> Void
+    private let onFrame: (CAMetalDrawable, _ presentingAt: Double, _ deadline: Double) -> Void
     private var thread: Thread!
     // Touched only on `thread`.
     private var link: CAMetalDisplayLink?
 
-    init(onFrame: @escaping (CAMetalDrawable, _ presentingAt: Double) -> Void) {
+    init(onFrame: @escaping (CAMetalDrawable, _ presentingAt: Double, _ deadline: Double) -> Void) {
         self.onFrame = onFrame
         super.init()
         thread = Thread {
@@ -70,7 +70,7 @@ final class DisplayLinkThread: NSObject, CAMetalDisplayLinkDelegate, @unchecked 
         // Secondary threads get no autorelease pool per run loop pass, and
         // every frame autoreleases its drawable.
         autoreleasepool {
-            onFrame(update.drawable, update.targetPresentationTimestamp)
+            onFrame(update.drawable, update.targetPresentationTimestamp, update.targetTimestamp)
         }
     }
 }
