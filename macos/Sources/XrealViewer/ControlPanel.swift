@@ -264,6 +264,18 @@ private struct ViewSection: View {
         Section("View") {
             Toggle("Follow Head Tilt", isOn: model.toggle(\.followsRoll, .toggleRoll))
             Toggle("Predict Head Motion", isOn: model.toggle(\.settings.prediction, .togglePrediction))
+            VStack(alignment: .leading) {
+                LabeledContent("Extra Prediction Lead") {
+                    Text(String(format: "%.0f ms", model.settings.latencyTrimMs)).monospacedDigit()
+                }
+                Slider(
+                    value: Binding(
+                        get: { model.settings.latencyTrimMs }, set: { model.perform(.setLatencyTrim($0)) }),
+                    in: 0...maxLatencyTrimMs, step: 1)
+                Text("Raise it if the canvas trails behind quick head turns, lower it if it overshoots.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .disabled(!model.settings.prediction)
             Toggle("Zoom Out to Show Cursor", isOn: model.toggle(\.settings.followCursor, .toggleFollowCursor))
             Toggle("Correct Lens Distortion", isOn: model.toggle(\.settings.lensCorrection, .toggleLensCorrection))
         }
@@ -353,7 +365,7 @@ private struct WindowsSection: View {
                     Button("Allow…") { model.askForWindowControl() }
                 }
             }
-            Button("Bring Back Windows Hidden Behind the Glasses") { model.perform(.gatherWindows) }
+            Button("Bring Back Windows Hidden Behind the Glasses") { model.perform(.window(.gather)) }
                 .disabled(!model.windowControlAllowed)
         }
     }
@@ -386,7 +398,7 @@ private struct DiagnosticsSection: View {
 
     var body: some View {
         Section {
-            DisclosureGroup("Diagnostics", isExpanded: model.toggle(\.settings.overlayVisible, .toggleStatus)) {
+            DisclosureGroup("Diagnostics", isExpanded: model.toggle(\.settings.diagnosticsVisible, .toggleDiagnostics)) {
                 Text(model.statusLines.joined(separator: "\n"))
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)

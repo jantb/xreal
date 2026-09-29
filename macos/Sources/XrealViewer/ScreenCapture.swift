@@ -129,13 +129,18 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     /// arrangement, in global points with a top-left origin.
     static func shareableFrame(of displayID: CGDirectDisplayID, timeout: Double) async -> CGRect? {
         let deadline = monotonicNow() + timeout
-        while monotonicNow() < deadline {
+        while monotonicNow() < deadline, !Task.isCancelled {
             if let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false),
                 let display = content.displays.first(where: { $0.displayID == displayID })
             {
                 return display.frame
             }
-            try? await Task.sleep(for: .milliseconds(500))
+            // A cancelled sleep throws at once; stop instead of polling flat out.
+            do {
+                try await Task.sleep(for: .milliseconds(500))
+            } catch {
+                return nil
+            }
         }
         return nil
     }

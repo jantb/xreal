@@ -24,6 +24,8 @@ public final class Tracking: Sendable {
     private let displayMode: Mutex<DisplayMode>
     /// Counts display modes set on the glasses, to wait for one.
     private let modesApplied = Mutex<UInt64>(0)
+    /// Whether the glasses are open and the tracking loop reads its commands.
+    private let attached = Mutex(false)
 
     /// `initialBias` is the gyro bias at the reference temperature and
     /// `biasSlope` how it changes per °C, as saved by an earlier run.
@@ -65,10 +67,12 @@ public final class Tracking: Sendable {
 
     /// Switches the glasses back to their own picture on both eyes and waits
     /// up to `timeout` seconds for it, so they are not left side by side
-    /// once the viewer quits.
+    /// once the viewer quits. Without the glasses there is nothing to wait
+    /// for: they take the restored mode when they connect.
     public func restoreDisplayMode(timeout: Double = 1) {
         let before = modesApplied.withLock { $0 }
         displayMode.withLock { $0 = .highRefreshRate }
+        guard attached.withLock({ $0 }) else { return }
         commands.withLock { $0.append(.applyDisplayMode) }
         let deadline = monotonicNow() + timeout
         while monotonicNow() < deadline, modesApplied.withLock({ $0 }) == before {
@@ -95,6 +99,9 @@ public final class Tracking: Sendable {
                 continue
             }
             reportedMissing = false
+            // Before the mode is read, so a restore that finds the glasses
+            // detached is seen here.
+            attached.withLock { $0 = true }
             let mode = displayMode.withLock { $0 }
             do {
                 try glasses.setDisplayMode(mode)
@@ -110,6 +117,7 @@ public final class Tracking: Sendable {
 
             session += 1
             track(glasses, session: session, bias: &bias)
+            attached.withLock { $0 = false }
             shared.withLock { $0.status = .searching }
             Thread.sleep(forTimeInterval: 0.5)
         }

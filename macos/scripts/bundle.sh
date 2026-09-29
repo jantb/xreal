@@ -16,5 +16,10 @@ mkdir -p "$app/Contents/Resources"
 cp .build/release/XrealViewer "$app/Contents/MacOS/"
 cp Resources/Info.plist "$app/Contents/Info.plist"
 cp build/AppIcon.icns "$app/Contents/Resources/"
-codesign --force --sign "${SIGN_IDENTITY:-Pace Local}" "$app"
+identity="${SIGN_IDENTITY:-Pace Local}"
+if [ "$identity" != "-" ] && ! security find-identity -v -p codesigning | grep -qF "\"$identity\""; then
+    echo "warning: no signing certificate named \"$identity\"; signing ad hoc, so macOS will ask for Screen Recording again after every build" >&2
+    identity="-"
+fi
+codesign --force --sign "$identity" "$app"
 echo "$app"

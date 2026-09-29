@@ -6,6 +6,7 @@ import XrealCore
     private var menu: StatusMenu?
     private var controls: ControlPanel?
     private var activity: NSObjectProtocol?
+    private var signalSources: [DispatchSourceSignal] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns")
@@ -18,6 +19,15 @@ import XrealCore
             CGRequestScreenCaptureAccess()
         }
         NSApp.mainMenu = mainMenu()
+        // A plain `kill` or Ctrl-C quits cleanly too, so the glasses are put
+        // back to their own picture instead of being left side by side.
+        signalSources = [SIGTERM, SIGINT, SIGHUP].map { number in
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+            source.setEventHandler { NSApp.terminate(nil) }
+            source.resume()
+            return source
+        }
         // Keeps macOS from napping or coalescing timers while other apps
         // have focus, which is most of the time.
         activity = ProcessInfo.processInfo.beginActivity(
@@ -102,7 +112,7 @@ func probe(seconds: Double) {
     }
     let sizes = asked.isEmpty ? canvasSizes.map { ($0.width, $0.height) } : asked
     for (width, height) in sizes {
-        guard let screen = VirtualScreen(index: 63, width: width, height: height) else {
+        guard let screen = VirtualScreen(index: 63, width: width, height: height, refreshRate: glassesRefreshRate) else {
             print("\(width)x\(height): refused")
             continue
         }

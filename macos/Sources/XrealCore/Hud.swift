@@ -28,7 +28,7 @@ public struct HudInfo {
     /// The pixel of the canvas looked at, nil when looking away from it.
     public var gaze: SIMD2<Float>?
     public var source: (width: Int, height: Int)?
-    /// What the glasses show, e.g. "CANVAS 5752X2160".
+    /// What the glasses show, e.g. "Canvas 5752×2160".
     public var sourceDescription: String
     public var output: (width: Int, height: Int)
     public var newFrame: Bool
@@ -59,52 +59,52 @@ public struct HudInfo {
 }
 
 public func hudLines(_ info: HudInfo) -> [String] {
-    let frameState = info.newFrame ? "NEW" : "HOLD"
+    let frameState = info.newFrame ? "New frame" : "Held frame"
     let tracking = info.tracking
 
     let imu: String
     switch tracking.status {
     case .connected:
         let ageMs = tracking.sampledAt.map { (info.now - $0) * 1000 } ?? 0
-        imu = String(format: "IMU OK %.0fHZ  AGE %.0fMS", tracking.sampleRateHz, ageMs)
+        imu = String(format: "IMU ok, %.0f Hz, sample age %.0f ms", tracking.sampleRateHz, ageMs)
     case .searching:
-        imu = "IMU NO GLASSES - RETRYING"
+        imu = "IMU: no glasses, retrying"
     }
     let calibration: String
     switch tracking.calibration {
     case .idle: calibration = ""
-    case .running(let progress): calibration = String(format: "  CALIBRATING %.0f%% - KEEP STILL", progress * 100)
-    case .succeeded: calibration = "  CALIBRATED"
-    case .failed: calibration = "  CALIBRATION FAILED - MOVED"
+    case .running(let progress): calibration = String(format: "  Calibrating %.0f%%, keep still", progress * 100)
+    case .succeeded: calibration = "  Calibrated"
+    case .failed: calibration = "  Calibration failed: the glasses moved"
     }
     let degreesPerMinute = { (rate: Float) in rate * 180 / .pi * 60 }
     let drift: String
     switch info.lastDrift {
-    case nil: drift = "RECENTER TEACHES DRIFT"
-    case .anchored: drift = "DRIFT REFERENCE SET"
-    case .tooSoon: drift = "DRIFT: WAIT 20S BETWEEN RECENTERS"
+    case nil: drift = "Recentering teaches drift"
+    case .anchored: drift = "Drift reference set"
+    case .tooSoon: drift = "Drift: wait 20 s between recenters"
     case .learned(let measured, _):
-        drift = String(format: "DRIFT %+.2f DEG/MIN - CORRECTED", degreesPerMinute(measured))
+        drift = String(format: "Drift %+.2f°/min, corrected", degreesPerMinute(measured))
     case .rejected(let measured):
-        drift = String(format: "DRIFT %+.1f DEG/MIN - IGNORED AS TURN", degreesPerMinute(measured))
+        drift = String(format: "Drift %+.1f°/min, ignored as a turn", degreesPerMinute(measured))
     }
 
-    let source = info.source.map { "SRC \($0.width)X\($0.height)" } ?? "SRC NO CAPTURE YET"
-    let view = info.gaze.map { String(format: "LOOKING AT %.0f,%.0f", $0.x, $0.y) } ?? "LOOKING AWAY FROM THE CANVAS"
+    let source = info.source.map { "Source \($0.width)×\($0.height)" } ?? "Source: no capture yet"
+    let view = info.gaze.map { String(format: "Looking at %.0f, %.0f", $0.x, $0.y) } ?? "Looking away from the canvas"
     let bias = tracking.gyroBias
-    let temperature = tracking.temperature.map { String(format: "  TEMP %.1fC", $0) } ?? ""
+    let temperature = tracking.temperature.map { String(format: "  Temp %.1f °C", $0) } ?? ""
 
     return [
-        String(format: "%@  %.0fFPS  CAPTURE %.0fFPS", frameState, info.stats.fps, info.stats.captureFps),
+        String(format: "%@, %.0f fps, capture %.0f fps", frameState, info.stats.fps, info.stats.captureFps),
         imu,
-        String(format: "BIAS %.4f %.4f %.4f", bias.x, bias.y, bias.z) + temperature
-            + "  LEARNED \(tracking.learnedWindows)  " + (tracking.still ? "STILL" : "MOVING") + calibration,
+        String(format: "Bias %.4f %.4f %.4f", bias.x, bias.y, bias.z) + temperature
+            + "  Learned \(tracking.learnedWindows)  " + (tracking.still ? "still" : "moving") + calibration,
         drift,
         info.sourceDescription,
-        "\(source)  OUT \(info.output.width)X\(info.output.height)",
+        "\(source)  Output \(info.output.width)×\(info.output.height)",
         view,
         String(
-            format: "YAW %.3f  PITCH %.3f  ROLL %.3f  PREDICT %@", info.pose.yaw, info.pose.pitch, info.pose.roll,
-            info.prediction ? "ON" : "OFF"),
+            format: "Yaw %.3f  Pitch %.3f  Roll %.3f  Prediction %@", info.pose.yaw, info.pose.pitch, info.pose.roll,
+            info.prediction ? "on" : "off"),
     ]
 }

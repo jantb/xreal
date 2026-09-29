@@ -16,7 +16,7 @@ import XrealCore
     /// `--probe-sizes` creates. `refreshRate` matches the glasses, so macOS
     /// draws the screen in step with them. Returns nil if the WindowServer
     /// refuses to create the display.
-    init?(index: Int, width: Int, height: Int, refreshRate: Double = 90) {
+    init?(index: Int, width: Int, height: Int, refreshRate: Double) {
         // Much larger displays crash the WindowServer, logging the user out.
         guard (1...maxVirtualScreenSide).contains(width), (1...maxVirtualScreenSide).contains(height) else {
             return nil

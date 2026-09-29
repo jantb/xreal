@@ -1,14 +1,21 @@
 import Foundation
 
+/// The most the prediction lead can be lengthened, in milliseconds.
+public let maxLatencyTrimMs: Float = 40
+
 /// The flattest curve kept, as a multiple of a screen's distance.
 private let maxCurveRadius: Float = 10
 
-/// User-tunable settings, persisted between runs as `key=value` lines. The
-/// file is shared with the Rust version of the app.
+/// User-tunable settings, persisted between runs as `key=value` lines. Files
+/// written by the old Rust version of the app still load.
 public struct Settings: Equatable, Sendable {
     public var prediction = true
-    /// Whether the diagnostics show in the controls window.
-    public var overlayVisible = true
+    /// Milliseconds added to how far ahead the head pose is predicted, to
+    /// make up for frames reaching the glasses later than assumed.
+    public var latencyTrimMs: Float = 0
+    /// Whether the diagnostics are expanded in the controls window. Saved as
+    /// `overlay_visible`, from when they were drawn over the picture.
+    public var diagnosticsVisible = true
     /// Gyro bias at the tracking's reference temperature, rad/s.
     public var gyroBias: SIMD3<Float> = .zero
     /// How the gyro bias changes per °C, rad/s, as learned so far.
@@ -66,13 +73,17 @@ public struct Settings: Equatable, Sendable {
             let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespaces)
             switch key {
             case "prediction": parse(value, into: &settings.prediction)
-            case "overlay_visible": parse(value, into: &settings.overlayVisible)
-            case "gyro_bias_x": parse(value, into: &settings.gyroBias.x)
-            case "gyro_bias_y": parse(value, into: &settings.gyroBias.y)
-            case "gyro_bias_z": parse(value, into: &settings.gyroBias.z)
-            case "gyro_bias_slope_x": parse(value, into: &settings.gyroBiasSlope.x)
-            case "gyro_bias_slope_y": parse(value, into: &settings.gyroBiasSlope.y)
-            case "gyro_bias_slope_z": parse(value, into: &settings.gyroBiasSlope.z)
+            case "overlay_visible": parse(value, into: &settings.diagnosticsVisible)
+            case "gyro_bias_x": parseFinite(value, into: &settings.gyroBias.x)
+            case "gyro_bias_y": parseFinite(value, into: &settings.gyroBias.y)
+            case "gyro_bias_z": parseFinite(value, into: &settings.gyroBias.z)
+            case "gyro_bias_slope_x": parseFinite(value, into: &settings.gyroBiasSlope.x)
+            case "gyro_bias_slope_y": parseFinite(value, into: &settings.gyroBiasSlope.y)
+            case "gyro_bias_slope_z": parseFinite(value, into: &settings.gyroBiasSlope.z)
+            case "latency_trim_ms":
+                if let trim = Float(value), trim.isFinite {
+                    settings.latencyTrimMs = min(max(trim, 0), maxLatencyTrimMs)
+                }
             case "canvas": canvas = canvas ?? parseScreen(value)
             case "glasses_only_screen": glassesOnlyScreen = glassesOnlyScreen ?? parseScreen(value)
             case "follow_roll": parse(value, into: &settings.followRoll)
@@ -98,7 +109,8 @@ public struct Settings: Equatable, Sendable {
     public func serialize() -> String {
         let lines = [
             "prediction=\(prediction)",
-            "overlay_visible=\(overlayVisible)",
+            "overlay_visible=\(diagnosticsVisible)",
+            "latency_trim_ms=\(latencyTrimMs)",
             "gyro_bias_x=\(gyroBias.x)",
             "gyro_bias_y=\(gyroBias.y)",
             "gyro_bias_z=\(gyroBias.z)",
@@ -148,6 +160,14 @@ public struct Settings: Equatable, Sendable {
     /// Sizes a virtual screen can be created at without upsetting macOS.
     private static func isScreenSize(_ width: Int, _ height: Int) -> Bool {
         (1...maxVirtualScreenSide).contains(width) && (1...maxVirtualScreenSide).contains(height)
+    }
+
+    /// A saved bias that is not a number would otherwise be clamped to the
+    /// largest bias and make the view drift.
+    private static func parseFinite(_ value: String, into target: inout Float) {
+        if let parsed = Float(value), parsed.isFinite {
+            target = parsed
+        }
     }
 
     private static func parse<T: LosslessStringConvertible>(_ value: String, into target: inout T) {

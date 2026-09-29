@@ -6,7 +6,7 @@ import simd
 @Test func savedSettingsLoadBackUnchanged() throws {
     var settings = Settings()
     settings.prediction = false
-    settings.overlayVisible = false
+    settings.diagnosticsVisible = false
     settings.gyroBias = SIMD3(0.0012, -0.0034, 0.00056)
     settings.gyroBiasSlope = SIMD3(0.00005, -0.0001, 0.00002)
     settings.canvas = RoomScreen(
@@ -90,7 +90,7 @@ import simd
         """
     let settings = Settings.parse(rust)
     #expect(settings.prediction == false)
-    #expect(settings.overlayVisible == true)
+    #expect(settings.diagnosticsVisible == true)
     #expect(settings.gyroBias == SIMD3(0.0012, -0.0034, 0.00056))
 }
 
@@ -125,4 +125,19 @@ import simd
     var settings = Settings()
     settings.lensCorrection = false
     #expect(!Settings.parse(settings.serialize()).lensCorrection)
+}
+
+@Test func aSavedBiasThatIsNotANumberIsIgnored() {
+    let settings = Settings.parse("gyro_bias_x=nan\ngyro_bias_y=inf\ngyro_bias_slope_z=nan\ngyro_bias_z=0.002\n")
+    #expect(settings.gyroBias == SIMD3(0, 0, 0.002))
+    #expect(settings.gyroBiasSlope == .zero)
+}
+
+@Test func theLatencyTrimStaysChosenAfterARestartAndStaysInRange() {
+    var settings = Settings()
+    settings.latencyTrimMs = 12
+    #expect(Settings.parse(settings.serialize()).latencyTrimMs == 12)
+    #expect(Settings.parse("latency_trim_ms=-5\n").latencyTrimMs == 0)
+    #expect(Settings.parse("latency_trim_ms=900\n").latencyTrimMs == maxLatencyTrimMs)
+    #expect(Settings.parse("latency_trim_ms=nan\n").latencyTrimMs == 0)
 }

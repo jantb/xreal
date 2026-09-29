@@ -30,7 +30,7 @@ private let scanoutTime = 0.008
 private let virtualScreenTimeout = 10.0
 // The glasses' refresh rate side by side, which the canvas follows so
 // macOS draws it in step with them.
-private let refreshRate = 90.0
+let glassesRefreshRate = 90.0
 // The canvas let go this close to level is set level, so it is easy to
 // straighten; tilted further it keeps its tilt.
 private let levelSnapTilt: Float = 2 * .pi / 180  // rad
@@ -76,15 +76,15 @@ enum SourceStatus: Equatable, Sendable {
     /// The canvas exists but did not come online or could not be captured.
     case failed(String)
 
-    /// The status in the status lines' capitals.
-    var hudDescription: String {
+    /// The status as the diagnostics show it.
+    var diagnosticsDescription: String {
         switch self {
-        case .starting: "SOURCE STARTING"
-        case .noGlasses: "GLASSES NOT CONNECTED"
-        case .creatingCanvas: "CREATING THE CANVAS"
-        case .refused: "MACOS REFUSED THE CANVAS - TRY ANOTHER SIZE"
-        case .live(let width, let height): "CANVAS \(width)X\(height)"
-        case .failed(let problem): problem.uppercased()
+        case .starting: "Source starting"
+        case .noGlasses: "Glasses not connected"
+        case .creatingCanvas: "Creating the canvas"
+        case .refused: "macOS refused the canvas, try another size"
+        case .live(let width, let height): "Canvas \(width)×\(height)"
+        case .failed(let problem): problem
         }
     }
 }
@@ -97,7 +97,8 @@ enum ViewerCommand {
     case togglePrediction
     case toggleRoll
     case toggleFollowCursor
-    case toggleStatus
+    case toggleDiagnostics
+    case setLatencyTrim(Float)
     case setCurveRadius(Float)
     case toggleLensCorrection
     case setDepthScale(Float)
@@ -110,13 +111,18 @@ enum ViewerCommand {
     /// Makes the canvas larger (true) or smaller.
     case resizeCanvas(bigger: Bool)
     case setCanvasSize(width: Int, height: Int)
+    case window(WindowCommand)
+}
+
+/// What can be done to windows, for `ViewerCommand.window`.
+enum WindowCommand {
     /// Moves the focused window to where the viewer is looking.
-    case moveWindowToGaze
+    case moveToGaze
     /// Fits the focused window into the zone the viewer is looking at.
-    case fitWindowToZone
+    case fitToZone
     case movePointerToGaze
     /// Brings back windows hidden behind the glasses view.
-    case gatherWindows
+    case gather
 }
 
 /// Everything both the render thread and the main thread (menu, keys) use.
@@ -240,7 +246,7 @@ struct ViewerState: Sendable {
 
         let biasChanged = snapshot.biasRevision != biasRevisionSaved
         biasRevisionSaved = snapshot.biasRevision
-        let lead = max(presentingAt - now, 0) + glassesDisplayDelay
+        let lead = max(presentingAt - now, 0) + glassesDisplayDelay + Double(settings.latencyTrimMs) / 1000
         let pose = settings.prediction ? snapshot.predict(now: now, lead: lead) : snapshot.pose
         lastPose = pose
         if snapshot.session != trackingSession {
@@ -317,7 +323,7 @@ struct ViewerState: Sendable {
 
     func hudInfo(now: Double) -> HudInfo {
         HudInfo(
-            gaze: gaze, source: sourceSize, sourceDescription: source.hudDescription, output: output,
+            gaze: gaze, source: sourceSize, sourceDescription: source.diagnosticsDescription, output: output,
             newFrame: newFrame, stats: stats, tracking: snapshot, pose: lastPose, prediction: settings.prediction,
             lastDrift: lastDrift, now: now)
     }
@@ -462,9 +468,9 @@ final class FrameLoop: @unchecked Sendable {
             hotKey(kVK_ANSI_Minus, .moveCanvas(closer: false)),
             hotKey(kVK_ANSI_RightBracket, .resizeCanvas(bigger: true)),
             hotKey(kVK_ANSI_LeftBracket, .resizeCanvas(bigger: false)),
-            hotKey(kVK_ANSI_W, .moveWindowToGaze),
-            hotKey(kVK_ANSI_F, .fitWindowToZone),
-            hotKey(kVK_ANSI_M, .movePointerToGaze),
+            hotKey(kVK_ANSI_W, .window(.moveToGaze)),
+            hotKey(kVK_ANSI_F, .window(.fitToZone)),
+            hotKey(kVK_ANSI_M, .window(.movePointerToGaze)),
         ]
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
@@ -515,12 +521,9 @@ final class FrameLoop: @unchecked Sendable {
     func perform(_ command: ViewerCommand) {
         var persist = true
         var restartSource = false
-        switch command {
-        case .moveWindowToGaze, .fitWindowToZone, .movePointerToGaze, .gatherWindows:
-            controlWindows(command)
+        if case .window(let windowCommand) = command {
+            controlWindows(windowCommand)
             return
-        default:
-            break
         }
         shared.mutex.withLock { state in
             switch command {
@@ -535,7 +538,8 @@ final class FrameLoop: @unchecked Sendable {
             case .togglePrediction: state.settings.prediction.toggle()
             case .toggleRoll: state.viewport.followsRoll.toggle()
             case .toggleFollowCursor: state.settings.followCursor.toggle()
-            case .toggleStatus: state.settings.overlayVisible.toggle()
+            case .toggleDiagnostics: state.settings.diagnosticsVisible.toggle()
+            case .setLatencyTrim(let ms): state.settings.latencyTrimMs = min(max(ms, 0), maxLatencyTrimMs)
             case .toggleLensCorrection: state.settings.lensCorrection.toggle()
             case .setDepthScale(let metres): state.settings.metresPerRoomUnit = metres
             case .setCurveRadius(let radius): state.settings.curveRadius = radius
@@ -557,7 +561,7 @@ final class FrameLoop: @unchecked Sendable {
             case .setCanvasSize(let width, let height):
                 restartSource = state.setCanvasSize(width: width, height: height, now: monotonicNow())
                 persist = restartSource
-            case .moveWindowToGaze, .fitWindowToZone, .movePointerToGaze, .gatherWindows:
+            case .window:
                 break
             }
         }
@@ -712,7 +716,7 @@ final class FrameLoop: @unchecked Sendable {
         )
     }
 
-    private func controlWindows(_ command: ViewerCommand) {
+    private func controlWindows(_ command: WindowCommand) {
         let gaze = gazeInArrangement()
         if case .movePointerToGaze = command {
             guard let gaze else { return }
@@ -722,16 +726,16 @@ final class FrameLoop: @unchecked Sendable {
         }
         guard WindowControl.allowed(prompt: true) else { return }
         switch command {
-        case .moveWindowToGaze:
+        case .moveToGaze:
             guard let gaze, let window = WindowControl.focusedWindow(), let frame = WindowControl.frame(of: window)
             else { return }
             WindowControl.move(window, to: windowOrigin(size: frame.size, centeredOn: gaze.point, within: gaze.display))
-        case .fitWindowToZone:
+        case .fitToZone:
             guard let gaze, let window = WindowControl.focusedWindow() else { return }
             WindowControl.setFrame(window, to: gaze.zone)
-        case .gatherWindows:
+        case .gather:
             gatherWindows()
-        default:
+        case .movePointerToGaze:
             break
         }
     }
@@ -786,7 +790,7 @@ final class FrameLoop: @unchecked Sendable {
         setSource(.creatingCanvas, captures: [])
         // A canvas of the same size is kept, so it stays put.
         if canvasScreen.map({ $0.width != canvas.width || $0.height != canvas.height }) ?? true {
-            canvasScreen = VirtualScreen(index: 0, width: canvas.width, height: canvas.height, refreshRate: refreshRate)
+            canvasScreen = VirtualScreen(index: 0, width: canvas.width, height: canvas.height, refreshRate: glassesRefreshRate)
         }
         guard let screen = canvasScreen else {
             setSource(.refused, captures: [])

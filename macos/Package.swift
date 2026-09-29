@@ -25,5 +25,6 @@ let package = Package(
             ]
         ),
         .testTarget(name: "XrealCoreTests", dependencies: ["XrealCore"]),
+        .testTarget(name: "XrealViewerTests", dependencies: ["XrealViewer", "XrealCore"]),
     ]
 )

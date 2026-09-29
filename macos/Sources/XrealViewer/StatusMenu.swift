@@ -60,11 +60,11 @@ private final class ActionItem: NSMenuItem {
             submenu(
                 "Windows",
                 [
-                    shortcut("Move Window to Where You Look", "w") { [viewer] in viewer.perform(.moveWindowToGaze) },
-                    shortcut("Fit Window to Zone You Look At", "f") { [viewer] in viewer.perform(.fitWindowToZone) },
-                    shortcut("Move Pointer to Where You Look", "m") { [viewer] in viewer.perform(.movePointerToGaze) },
+                    shortcut("Move Window to Where You Look", "w") { [viewer] in viewer.perform(.window(.moveToGaze)) },
+                    shortcut("Fit Window to Zone You Look At", "f") { [viewer] in viewer.perform(.window(.fitToZone)) },
+                    shortcut("Move Pointer to Where You Look", "m") { [viewer] in viewer.perform(.window(.movePointerToGaze)) },
                     ActionItem("Bring Back Windows Hidden Behind the Glasses") { [viewer] in
-                        viewer.perform(.gatherWindows)
+                        viewer.perform(.window(.gather))
                     },
                 ] + (WindowControl.allowed(prompt: false)
                     ? [] : [.separator(), hint("Moving windows needs Accessibility access")])))
