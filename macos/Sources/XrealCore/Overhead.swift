@@ -160,18 +160,59 @@ public func overheadPanels(canvas: RoomScreen, curveRadius: Float = 1, layout: O
         )
     }
     let dashboard = layout.dashboard.map(panel)
-    var pinned = layout.pinned.map(panel)
-    // Drawn larger on the sphere, the dashboard may reach into the gap
-    // beside it: the window moves over to keep that gap.
-    if canvas.spherical, let board = dashboard?.rect, let window = pinned?.rect, let beside = layout.pinned,
-        let under = layout.dashboard, beside.left > under.right
-    {
-        let gap = overheadSpacing * roomUnitsPerPixel / distance / .pi
-        let shift = max(board.right + gap - window.left, 0)
-        pinned?.rect = SurfaceRect(
-            left: window.left + shift, right: window.right + shift, top: window.top, bottom: window.bottom)
+    guard canvas.spherical, let window = layout.pinned else { return (dashboard, layout.pinned.map(panel)) }
+    // The pinned window is a monitor of its own: a small wrapped screen
+    // centred on its own middle and turned to face the eyes, curving round
+    // its middle as the canvas does round its own. Placed by angle, clear of
+    // the canvas below and of the dashboard beside it.
+    let perPoint = roomUnitsPerPixel / distance
+    let halfWidth = (window.right - window.left) / 2 * Float(canvas.width) * roomUnitsPerPixel / 2
+    let halfHeight = (window.top - window.bottom) / 2 * layout.height * roomUnitsPerPixel / 2
+    let (acrossHalf, riseHalf) = (halfWidth / distance, halfHeight / distance)
+    let gap = overheadSpacing * perPoint
+    let base = panel(SurfaceRect(left: window.left, right: window.right, top: window.bottom + 0.01, bottom: window.bottom))
+    var across = base.rect.left * .pi + acrossHalf
+    var bottom = mercatorRise(base.rect.bottom)
+    if let board = dashboard?.rect, let under = layout.dashboard {
+        if window.left > under.right {
+            across = board.right * .pi + gap + acrossHalf
+        } else {
+            across = (board.left + board.right) / 2 * .pi
+            bottom = mercatorRise(board.top) + gap
+        }
     }
-    return (dashboard, pinned)
+    // Turned up to face the eyes, its bottom corners fall a little below its
+    // bottom middle; lifted by as much.
+    var rise = bottom + riseHalf
+    for _ in 0..<4 {
+        rise = bottom + riseHalf + acrossHalf * acrossHalf / 2 * tan(rise)
+    }
+    func monitor(across: Float) -> ScreenSurface {
+        let forward = SIMD3(sin(across) * cos(rise), sin(rise), -cos(across) * cos(rise))
+        let right = normalize(cross(forward, SIMD3(0, 1, 0)))
+        let facing = simd_quatf(simd_float3x3(right, cross(right, forward), -forward))
+        return ScreenSurface(
+            center: SIMD3(0, 0, -distance), right: SIMD3(halfWidth, 0, 0), up: SIMD3(0, halfHeight, 0),
+            halfArc: acrossHalf, spin: turn * facing, wrap: 1)
+    }
+    var placed = monitor(across: across)
+    // Its sides lean once it is turned up, so its corners come closer to the
+    // dashboard than its middle: moved over until all of its near side
+    // keeps the gap.
+    if let board = dashboard?.rect, let under = layout.dashboard, window.left > under.right {
+        let azimuth = { (point: SIMD3<Float>) -> Float in
+            let local = turn.inverse.act(point)
+            return atan2(local.x, -local.z)
+        }
+        for _ in 0..<4 {
+            let nearest = [Float(-1), -0.5, 0, 0.5, 1].map { azimuth(placed.point(at: SIMD2(-1, $0))) }.min() ?? across
+            let short = board.right * .pi + gap - nearest
+            guard short > 1e-5 else { break }
+            across += short
+            placed = monitor(across: across)
+        }
+    }
+    return (dashboard, (placed, .whole))
 }
 
 /// Where a pointer image `size` points large, with its hot spot `hotSpot`

@@ -179,11 +179,22 @@ private func topEdge(of screen: RoomScreen, atAzimuth azimuth: Float) -> Float? 
         #expect(abs(simd_length(point) - 1.3) < 1e-3 && abs(dot(normalize(across), normalize(point))) < 1e-2, "x \(x)")
     }
     let (window, rect) = try #require(panels.pinned)
-    // Beside the dashboard, not over it: both across the same sphere.
-    #expect(rect.left > boardRect.right)
+    // Beside the dashboard, not over it: its left edge is further round
+    // than the dashboard's right one, all the way up.
+    let azimuth = { (point: SIMD3<Float>) in atan2(point.x, -point.z) }
+    let boardRight = azimuth(board.point(at: SIMD2(boardRect.right, boardRect.bottom)))
+    for y in [Float(-1), 0, 1] {
+        #expect(azimuth(window.point(at: SIMD2(rect.left, y))) > boardRight, "y \(y)")
+    }
     let (midX, midY) = ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2)
-    // Where the layout put it: beside the dashboard, off to the right.
-    #expect(window.point(at: SIMD2(midX, midY)).x > 0)
+    // A monitor of its own: curving round its own middle, which faces the
+    // eyes straight on.
+    let middle = window.point(at: SIMD2(midX, midY))
+    let across = window.point(at: SIMD2(midX + 0.001, midY)) - window.point(at: SIMD2(midX - 0.001, midY))
+    let upward = window.point(at: SIMD2(midX, midY + 0.001)) - window.point(at: SIMD2(midX, midY - 0.001))
+    #expect(abs(simd_length(window.point(at: SIMD2(-1, 0))) - simd_length(window.point(at: SIMD2(1, 0)))) < 1e-4)
+    #expect(abs(dot(normalize(across), normalize(middle))) < 1e-3 && abs(dot(normalize(upward), normalize(middle))) < 1e-3)
+    #expect(middle.x > 0)
     for x in [rect.left, midX, rect.right] {
         for y in [rect.bottom, midY, rect.top] {
             let point = window.point(at: SIMD2(x, y))
