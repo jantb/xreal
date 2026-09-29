@@ -86,7 +86,11 @@ Diagnostic commands: `--probe`, `--probe-sizes`, `--probe-mode`, `--dump-config`
   panicked a Mac. `maxVirtualScreenSide` enforces it, and `canvasSizes` lists
   the sizes macOS 27 gives as asked, in points; the HiDPI ones (scale 2) have
   twice the pixels each way. Other standard sizes are refused or come up
-  smaller. `--probe-sizes 1920x1080@2x` probes a HiDPI size.
+  smaller. `--probe-sizes 1920x1080@2x` probes a HiDPI size. Two HiDPI sizes,
+  5120×1440 and 5120×2160 at 2x (10240 px wide), are allowed past the limit:
+  each came up fine when probed on its own. The panic came from many oversize
+  displays made in one run. `--probe-sizes --beyond-limit` tries others; save
+  everything first.
 - Quitting (or `kill`) puts the glasses back to their own picture. A crash
   leaves them side by side until they are replugged; `--probe-mode 11`
   switches them back.

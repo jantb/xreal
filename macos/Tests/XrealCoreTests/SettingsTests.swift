@@ -168,3 +168,11 @@ import simd
     let loaded = Settings.parse("canvas=9223372036854775807x1,2x@0,0,-1,1\n")
     #expect(loaded.canvas == Settings().canvas)
 }
+
+@Test func onlyTheSizesProbedPastTheLimitLoadPastIt() {
+    #expect(Settings.parse("canvas=5120x2160,2x,curved@0,0,-1,1\n").canvas.width == 5120)
+    #expect(Settings.parse("canvas=5120x1440,2x@0,0,-1,1\n").canvas.height == 1440)
+    for other in ["5120x2880,2x", "6144x2160,2x", "10240x2160", "5120x2161,2x"] {
+        #expect(Settings.parse("canvas=\(other)@0,0,-1,1\n").canvas == Settings().canvas, "\(other)")
+    }
+}

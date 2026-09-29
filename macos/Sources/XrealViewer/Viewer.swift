@@ -61,17 +61,19 @@ private let outlineTime = 1.0
 private let arrangementSettleTime = 2.0
 
 /// Virtual screen sizes that macOS 27 creates as asked, in points, smallest
-/// first, each HiDPI one (scale 2) after its plain twin: the sizes the
+/// first, each HiDPI one (scale 2) after its plain twin where there is one: the sizes the
 /// canvas steps through when resized. Nearby standard sizes such as 3840 ×
 /// 2160, 5120 × 2880 or 5760 × 2160 are refused or come up smaller, and so
 /// are 5752 × 3240 and 5752 × 4320. 7672 × 2160 wraps about 170° at the
 /// glasses' pixel density; 5752 × 2880 about 125°, and a third taller;
 /// 7672 × 4320 is as wide and twice as tall. The HiDPI ones draw text at
 /// twice the detail, 3840 × 2160, 5760 × 3240 and 7664 × 4320 pixels,
-/// filtered down.
+/// filtered down; 5120 × 1440 and 5120 × 2160 at 2x are the two allowed past
+/// `maxVirtualScreenSide` (see `sizesProbedBeyondLimit`), and by far the
+/// heaviest to draw and capture.
 let canvasSizes: [(width: Int, height: Int, scale: Int)] = [
-    (1920, 1080, 1), (1920, 1080, 2), (2880, 1620, 1), (2880, 1620, 2), (5120, 1440, 1), (3832, 2160, 1),
-    (3832, 2160, 2), (5752, 2160, 1), (5752, 2880, 1), (7672, 2160, 1), (7672, 4320, 1),
+    (1920, 1080, 1), (1920, 1080, 2), (2880, 1620, 1), (2880, 1620, 2), (5120, 1440, 1), (5120, 1440, 2),
+    (3832, 2160, 1), (3832, 2160, 2), (5120, 2160, 2), (5752, 2160, 1), (5752, 2880, 1), (7672, 2160, 1), (7672, 4320, 1),
 ]
 
 /// What the glasses show, or why they show nothing.

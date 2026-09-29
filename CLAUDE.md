@@ -7,7 +7,9 @@ See README.md for what the app is, how to build and run it, and its layout.
 - Tests assert behaviour a caller depends on, not implementation shape.
 - Never create a virtual display over 8192 px in either dimension, and do not
   run size probes beyond the sizes in `canvasSizes` without asking: larger
-  sizes panicked the machine.
+  sizes panicked the machine. The only exceptions are the two HiDPI sizes in
+  `sizesProbedBeyondLimit` (5120×1440 and 5120×2160 at 2x), each probed alone
+  on the user's request. Never probe several oversize sizes in one run.
 - Hardware behaviour (latency, drift, buttons) cannot be checked without the
   glasses; say so instead of claiming it works.
 - The old Rust prototype (src/, Cargo.*) was removed; it lives in git history before the "Add a controls window" commit.

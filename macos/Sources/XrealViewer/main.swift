@@ -103,22 +103,29 @@ func probe(seconds: Double) {
     }
 }
 
-/// `--probe-sizes [WxH[@2x] ...]`: creates a virtual screen of each size in
-/// turn and prints the size macOS actually gives it, in points and pixels.
-/// macOS refuses or shrinks some sizes, and which ones changes between
-/// releases. `@2x` asks for a HiDPI screen of that many points.
+/// `--probe-sizes [--beyond-limit] [WxH[@2x] ...]`: creates a virtual screen
+/// of each size in turn and prints the size macOS actually gives it, in
+/// points and pixels. macOS refuses or shrinks some sizes, and which ones
+/// changes between releases. `@2x` asks for a HiDPI screen of that many
+/// points. `--beyond-limit` also tries sizes past `maxVirtualScreenSide`
+/// pixels, which has panicked a Mac: save everything first.
 @MainActor func probeSizes(_ arguments: [String]) {
+    let beyondLimit = arguments.contains("--beyond-limit")
     let asked = arguments.compactMap { argument -> (width: Int, height: Int, scale: Int)? in
         let (size, scale) = argument.hasSuffix("@2x") ? (argument.dropLast(3), 2) : (Substring(argument), 1)
         let parts = size.split(separator: "x").compactMap { Int($0) }
         return parts.count == 2 ? (parts[0], parts[1], scale) : nil
     }
-    let sizes = asked.isEmpty ? canvasSizes.map { ($0.width, $0.height, $0.scale) } : asked
+    // Without sizes named, every canvas size within the limit, never the
+    // ones past it: several oversize displays in one run panicked a Mac.
+    let listed = canvasSizes.filter { $0.width * $0.scale <= maxVirtualScreenSide && $0.height * $0.scale <= maxVirtualScreenSide }
+    let sizes = asked.isEmpty ? listed.map { ($0.width, $0.height, $0.scale) } : asked
     for (width, height, scale) in sizes {
         let name = "\(width)x\(height)" + (scale == 2 ? "@2x" : "")
         guard
             let screen = VirtualScreen(
-                index: 31, width: width, height: height, scale: scale, refreshRate: glassesRefreshRate)
+                index: 31, width: width, height: height, scale: scale, refreshRate: glassesRefreshRate,
+                beyondLimit: beyondLimit)
         else {
             print("\(name): refused")
             continue

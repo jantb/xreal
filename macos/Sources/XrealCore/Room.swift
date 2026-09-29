@@ -31,6 +31,12 @@ private let zoneHeight: Float = 2160
 /// asked for virtual displays much wider than 8K.
 public let maxVirtualScreenSide = 8192
 
+/// The only sizes allowed past `maxVirtualScreenSide`, in points with their
+/// scale: each was probed on its own and came up as asked, 10240 × 2880 and
+/// 10240 × 4320 pixels. The panic came from many oversize displays made one
+/// after another.
+public let sizesProbedBeyondLimit: [(width: Int, height: Int, scale: Int)] = [(5120, 1440, 2), (5120, 2160, 2)]
+
 /// Where a virtual screen hangs in the room. It always faces the viewer, and
 /// is upright unless tilted.
 public struct ScreenPlacement: Equatable, Sendable {
@@ -317,10 +323,14 @@ public struct RoomScreen: Equatable, Sendable {
     }
 
     /// Whether a virtual screen of this size can be made without upsetting
-    /// macOS.
+    /// macOS: within `maxVirtualScreenSide`, or one of the few sizes probed
+    /// past it.
     public static func isAllowed(width: Int, height: Int, scale: Int) -> Bool {
+        if sizesProbedBeyondLimit.contains(where: { $0 == (width, height, scale) }) {
+            return true
+        }
         // Checked before multiplying, so no size can overflow.
-        (scale == 1 || scale == 2) && (1...maxVirtualScreenSide / scale).contains(width)
+        return (scale == 1 || scale == 2) && (1...maxVirtualScreenSide / scale).contains(width)
             && (1...maxVirtualScreenSide / scale).contains(height)
     }
 

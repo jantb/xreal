@@ -19,11 +19,17 @@ import XrealCore
     /// `index` tells screens apart, such as the canvas and the ones
     /// `--probe-sizes` creates. `width` and `height` are in points, and
     /// `scale` is 2 for a HiDPI screen with twice as many pixels each way.
-    /// `refreshRate` is how often macOS draws it. Returns nil if the
+    /// `refreshRate` is how often macOS draws it. `beyondLimit` lets
+    /// `--probe-sizes --beyond-limit` try a size past `maxVirtualScreenSide`,
+    /// up to 16384 pixels a side, which has panicked a Mac; nothing else
+    /// passes it. Returns nil if the
     /// WindowServer refuses to create the display.
-    init?(index: Int, width: Int, height: Int, scale: Int = 1, refreshRate: Double) {
+    init?(index: Int, width: Int, height: Int, scale: Int = 1, refreshRate: Double, beyondLimit: Bool = false) {
         // Much larger displays crash the WindowServer, logging the user out.
-        guard RoomScreen.isAllowed(width: width, height: height, scale: scale) else { return nil }
+        guard RoomScreen.isAllowed(width: width, height: height, scale: scale)
+            || (beyondLimit && (scale == 1 || scale == 2) && (1...16384 / scale).contains(width)
+                && (1...16384 / scale).contains(height))
+        else { return nil }
         let (pixelsWide, pixelsHigh) = (width * scale, height * scale)
         let descriptor = CGVirtualDisplayDescriptor()
         descriptor.queue = DispatchQueue(label: "xreal.virtual-screen")
