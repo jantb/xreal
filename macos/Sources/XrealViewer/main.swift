@@ -1,4 +1,5 @@
 import AppKit
+import Metal
 import XrealCore
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -215,6 +216,46 @@ func record(seconds: Double, path: String) -> Bool {
         print("failed: \(problem)")
     }
     return problem == nil
+}
+
+/// `--dashboard FILE`: writes the dashboard shown above the canvas, as it
+/// looks now, to `FILE` as a PNG, with made-up readings for the glasses.
+@MainActor func renderDashboard(to path: String) -> Bool {
+    guard let device = MTLCreateSystemDefaultDevice() else { return false }
+    let dashboard = Dashboard(device: device)
+    let glasses = GlassesReadings(temperature: 31.4, trackingHz: 1000, fps: 90, latency: 0.021, lateFramesPerSecond: 0.5)
+    // A few looks a second apart, for rates and a little history.
+    for _ in 0..<4 {
+        _ = dashboard.png(glasses: glasses)
+        Thread.sleep(forTimeInterval: 1)
+    }
+    // How long a look at the Mac and a redraw take, to judge how often
+    // the dashboard can afford to update.
+    var monitor = SystemMonitor()
+    var started = monotonicNow()
+    for _ in 0..<20 { _ = monitor.sample(now: monotonicNow()) }
+    let looking = (monotonicNow() - started) / 20
+    started = monotonicNow()
+    for _ in 0..<20 {
+        dashboard.update(glasses: glasses)
+        dashboard.settle()
+    }
+    let updating = (monotonicNow() - started) / 20
+    print(String(format: "a look at the Mac takes %.1f ms, a whole update %.1f ms", looking * 1000, updating * 1000))
+    guard let png = dashboard.png(glasses: glasses), (try? png.write(to: URL(fileURLWithPath: path))) != nil else {
+        print("failed to write \(path)")
+        return false
+    }
+    print("wrote \(path)")
+    return true
+}
+
+if let index = CommandLine.arguments.firstIndex(of: "--dashboard") {
+    guard let path = CommandLine.arguments.dropFirst(index + 1).first else {
+        print("usage: --dashboard FILE")
+        exit(1)
+    }
+    exit(MainActor.assumeIsolated { renderDashboard(to: path) } ? 0 : 1)
 }
 
 // `--dump-config`: prints the glasses' factory calibration, as JSON.

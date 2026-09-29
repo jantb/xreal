@@ -5,34 +5,65 @@ import simd
 
 private let canvas = RoomScreen(width: 5752, height: 2160, curved: true)
 
-@Test func theStatusStripHangsCentredAboveTheCanvasAndThePinnedWindowAboveIt() throws {
-    let layout = overheadLayout(canvas: canvas, strip: SIMD2(1200, 36), pinned: SIMD2(800, 600))
-    let strip = try #require(layout.strip)
-    let pinned = try #require(layout.pinned)
-    #expect(strip.bottom > 1)
-    #expect(pinned.bottom > strip.top)
-    for rect in [strip, pinned] {
-        #expect(abs(rect.left + rect.right) < 1e-5)
-    }
-    // Their sizes in points are kept: the strip is 1200 of 5752 points wide.
-    #expect(abs((strip.right - strip.left) / 2 * 5752 - 1200) < 0.5)
-    #expect(abs((pinned.top - pinned.bottom) / 2 * 2160 - 600) < 0.5)
+private func elevation(_ point: SIMD3<Float>) -> Float {
+    atan2(point.y, simd_length(SIMD2(point.x, point.z)))
 }
 
-@Test func thePinnedWindowTakesTheStripsPlaceWithoutOne() throws {
-    let layout = overheadLayout(canvas: canvas, strip: nil, pinned: SIMD2(800, 600))
-    #expect(layout.strip == nil)
-    let pinned = try #require(layout.pinned)
-    #expect(pinned.bottom > 1)
-    #expect(pinned.bottom < 1.1)
+@Test func theDashboardIsCentredAndThePinnedWindowRestsBesideIt() throws {
+    let layout = overheadLayout(canvas: canvas, dashboard: SIMD2(2000, 172), pinned: SIMD2(800, 600))
+    let board = try #require(layout.dashboard)
+    let window = try #require(layout.pinned)
+    #expect(abs(board.left + board.right) < 1e-5)
+    #expect(window.left > board.right)
+    // Both rest on the row's bottom edge, which is as tall as the taller.
+    #expect(board.bottom == -1 && window.bottom == -1)
+    #expect(layout.height == 600)
+    // Sizes in points are kept: the dashboard is 2000 of 5752 points wide.
+    #expect(abs((board.right - board.left) / 2 * 5752 - 2000) < 0.5)
+}
+
+@Test func onANarrowCanvasThePinnedWindowGoesAboveTheDashboard() throws {
+    let small = RoomScreen(width: 1920, height: 1080)
+    let layout = overheadLayout(canvas: small, dashboard: SIMD2(1900, 172), pinned: SIMD2(800, 600))
+    let board = try #require(layout.dashboard)
+    let window = try #require(layout.pinned)
+    #expect(window.bottom > board.top)
+    #expect(window.top <= 1 + 1e-5)
 }
 
 @Test func aWindowWiderThanTheCanvasIsShrunkToItsWidth() throws {
     let small = RoomScreen(width: 1920, height: 1080)
-    let pinned = try #require(overheadLayout(canvas: small, strip: nil, pinned: SIMD2(3840, 1000)).pinned)
-    #expect(pinned.left >= -1 - 1e-5 && pinned.right <= 1 + 1e-5)
+    let layout = overheadLayout(canvas: small, dashboard: nil, pinned: SIMD2(3840, 1000))
+    let window = try #require(layout.pinned)
+    #expect(window.left >= -1 - 1e-5 && window.right <= 1 + 1e-5)
     // Kept in proportion.
-    #expect(abs((pinned.top - pinned.bottom) / 2 * 1080 - 500) < 0.5)
+    #expect(abs(layout.height - 500) < 0.5)
+}
+
+@Test func theRowHangsJustAboveTheCanvasTurnedToFaceTheViewer() {
+    let placements = [
+        ScreenPlacement.straightAhead, ScreenPlacement(direction: SIMD3(0.5, -0.3, -0.8), tilt: 0.2),
+    ]
+    for placement in placements {
+        for curved in [true, false] {
+            var screen = canvas
+            screen.curved = curved
+            screen.placement = placement
+            let row = overheadSurface(canvas: screen, height: 400)
+            let canvasTop = screen.surface().point(at: SIMD2(0, 1))
+            let rowBottom = row.point(at: SIMD2(0, -1))
+            let rowMiddle = row.point(at: .zero)
+            let upward = row.point(at: SIMD2(0, 0.01)) - row.point(at: SIMD2(0, -0.01))
+            // Seen just above the canvas's top edge, as the canvas's up goes.
+            let turn = placement.orientation.inverse
+            let seen = { (point: SIMD3<Float>) in elevation(turn.act(point)) }
+            #expect(seen(rowBottom) > seen(canvasTop), "curved \(curved)")
+            #expect(seen(rowBottom) - seen(canvasTop) < 0.05, "curved \(curved)")
+            // Its middle faces the eyes: straight up it runs across the line
+            // of sight, not along the canvas.
+            #expect(abs(dot(normalize(upward), normalize(rowMiddle))) < 1e-3, "curved \(curved)")
+        }
+    }
 }
 
 @Test func thePointersHotSpotLandsWhereTheMouseIs() {
@@ -45,25 +76,47 @@ private let canvas = RoomScreen(width: 5752, height: 2160, curved: true)
     #expect(abs((rect.right - rect.left) / 2 * 5752 - 32) < 0.01)
 }
 
-@Test func theStatusShowsWhatIsKnownAndLeavesOutWhatIsNot() {
-    let everything = statusItems(
-        StatusReadings(
-            clock: "14:05", battery: Battery(percent: 82, charging: true), cpuLoad: 0.12,
-            memory: MemoryUse(used: 18 << 30, total: 32 << 30), glassesTemperature: 31.2, trackingHz: 1000,
-            fps: 90, latency: 0.024, lateFramesPerSecond: 1.5))
-    let line = everything.joined(separator: " ")
-    for part in ["14:05", "82%", "12%", "18.0", "32", "31.2", "1000", "90", "24", "1.5"] {
-        #expect(line.contains(part), "\(part) in \(line)")
-    }
-
-    let desktop = statusItems(StatusReadings(clock: "14:05"))
-    #expect(!desktop.joined().contains("Battery"))
-    #expect(!desktop.joined().contains("late"))
-}
-
 @Test func cpuLoadIsTheShareOfTimeSpentBusy() {
     let before = CpuTicks(busy: 1000, idle: 5000)
     #expect(CpuTicks(busy: 1030, idle: 5070).load(since: before) == 0.3)
     #expect(before.load(since: before) == nil)
     #expect(CpuTicks.now() != nil)
+    #expect(CpuTicks.perCore()?.isEmpty == false)
+}
+
+@Test func aHistoryKeepsOnlyTheLatestValuesOldestFirst() {
+    var history = History(capacity: 3)
+    for value in [1, 2, 3, 4, 5] as [Float] {
+        history.append(value)
+    }
+    #expect(history.values == [3, 4, 5])
+}
+
+@Test func trafficIsBytesPerSecondAndACounterGoingBackIsNoReading() throws {
+    let before = NetworkCounters(received: 1000, sent: 500)
+    let rate = try #require(NetworkCounters(received: 3000, sent: 1500).rate(since: before, seconds: 2))
+    #expect(rate.down == 1000 && rate.up == 500)
+    #expect(NetworkCounters(received: 10, sent: 10).rate(since: before, seconds: 1) == nil)
+    let disk = try #require(DiskCounters(read: 400, written: 200).rate(since: DiskCounters(read: 0, written: 0), seconds: 4))
+    #expect(disk.read == 100 && disk.write == 50)
+}
+
+@Test func theBusiestProcessesComeFirstWithHelpersCountedTogether() {
+    let before = ProcessTimes(
+        times: [1: 0, 2: 0, 3: 0, 4: 0], names: [1: "Xcode", 2: "Helper", 3: "Helper", 4: "Idle"])
+    let after = ProcessTimes(
+        times: [1: 1_500_000_000, 2: 600_000_000, 3: 600_000_000, 4: 0], names: before.names)
+    let busiest = after.busiest(since: before, seconds: 1, count: 2)
+    #expect(busiest.map(\.name) == ["Xcode", "Helper"])
+    #expect(abs(busiest[0].share - 1.5) < 1e-5)
+    #expect(abs(busiest[1].share - 1.2) < 1e-5)
+}
+
+@Test func lookingAtTheMacTwiceGivesLoadsForEveryCore() {
+    var monitor = SystemMonitor()
+    _ = monitor.sample(now: 0)
+    let sample = monitor.sample(now: 0.1)
+    #expect(sample.cpu != nil)
+    #expect(sample.cores.count == CpuTicks.perCore()?.count)
+    #expect(sample.memory != nil)
 }

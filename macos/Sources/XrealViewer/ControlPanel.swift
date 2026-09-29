@@ -324,7 +324,7 @@ private struct AboveCanvasSection: View {
         let pinned = model.settings.pinnedWindow
         let windows = model.pinnableWindows.map(\.window)
         Section("Above the Canvas") {
-            Toggle("Status Line", isOn: model.toggle(\.settings.statusStrip, .toggleStatusStrip))
+            Toggle("Dashboard", isOn: model.toggle(\.settings.statusStrip, .toggleStatusStrip))
             HStack {
                 Picker(
                     "Pinned Window",
@@ -346,7 +346,7 @@ private struct AboveCanvasSection: View {
                 .help("Look for windows again")
             }
             Text(
-                "Look up to see them. The pinned window can stay anywhere, even on the glasses' own display behind the view."
+                "Look up to see them: the Mac's CPU, memory, GPU, network, battery and disk, its busiest apps, the glasses and latency, and the pinned window beside them. The pinned window can stay anywhere, even on the glasses' own display behind the view."
             )
             .font(.caption).foregroundStyle(.secondary)
         }

@@ -31,9 +31,11 @@ private let pinnedFps = 30
 // Its capture's longest side, in pixels.
 private let maxPinnedPixels: CGFloat = 4096
 // How often the pinned window is checked for moving, resizing or closing,
-// and the status strip and the pointer's shape brought up to date.
+// and the dashboard and the pointer's shape brought up to date.
 private let pinnedCheckInterval = 2.0
-private let statusInterval = 1.0
+// Ten times a second: numbers and graphs move smoothly, and a look at the
+// Mac and a redraw take a few milliseconds on a queue of their own.
+private let statusInterval = 0.1
 private let pointerInterval = 1.0 / 15
 // The glasses' refresh rate side by side, which the canvas follows so
 // macOS draws it in step with them.
@@ -65,10 +67,11 @@ private let arrangementSettleTime = 2.0
 /// are 5752 × 3240 and 5752 × 4320. 7672 × 2160 wraps about 170° at the
 /// glasses' pixel density; 5752 × 2880 about 125°, and a third taller;
 /// 7672 × 4320 is as wide and twice as tall. The HiDPI ones draw text at
-/// twice the detail, 3840 × 2160 and 5760 × 3240 pixels, filtered down.
+/// twice the detail, 3840 × 2160, 5760 × 3240 and 7664 × 4320 pixels,
+/// filtered down.
 let canvasSizes: [(width: Int, height: Int, scale: Int)] = [
     (1920, 1080, 1), (1920, 1080, 2), (2880, 1620, 1), (2880, 1620, 2), (5120, 1440, 1), (3832, 2160, 1),
-    (5752, 2160, 1), (5752, 2880, 1), (7672, 2160, 1), (7672, 4320, 1),
+    (3832, 2160, 2), (5752, 2160, 1), (5752, 2880, 1), (7672, 2160, 1), (7672, 4320, 1),
 ]
 
 /// What the glasses show, or why they show nothing.
@@ -356,16 +359,19 @@ struct ViewerState: Sendable {
         // A canvas still starting up has nothing to show yet.
         room.panels.removeAll { panel in panel.tile.map { $0 >= frameSizes.count || frameSizes[$0] == nil } ?? false }
 
-        // Above the canvas, on its surface carried on upwards.
-        let surface = canvas.surface(curveRadius: curveRadius)
+        // Above the canvas, in a row tilted to face the viewer.
         let overhead = overheadLayout(
-            canvas: canvas, strip: settings.statusStrip ? extras.status : nil, pinned: extras.pinned)
-        if let rect = overhead.strip {
-            room.panels.append(RoomView.Panel(source: .status, surface: surface, rect: rect))
+            canvas: canvas, dashboard: settings.statusStrip ? extras.status : nil, pinned: extras.pinned)
+        if overhead.height > 0 {
+            let row = overheadSurface(canvas: canvas, curveRadius: curveRadius, height: overhead.height)
+            if let rect = overhead.dashboard {
+                room.panels.append(RoomView.Panel(source: .status, surface: row, rect: rect))
+            }
+            if let rect = overhead.pinned {
+                room.panels.append(RoomView.Panel(source: .pinned, surface: row, rect: rect))
+            }
         }
-        if let rect = overhead.pinned {
-            room.panels.append(RoomView.Panel(source: .pinned, surface: surface, rect: rect))
-        }
+        let surface = canvas.surface(curveRadius: curveRadius)
         // The pointer last, over everything it lies on.
         if settings.livePointer, let pointer = extras.pointer, let point = cursor.flatMap(canvasPoint(ofCursor:)) {
             let rect = pointerRect(canvas: canvas, at: point, size: pointer.size, hotSpot: pointer.hotSpot)
@@ -483,7 +489,7 @@ final class FrameLoop: @unchecked Sendable {
             pointer: pointer.mutex.withLock { $0.frame })
         let hotSpot = pointer.mutex.withLock { $0.hotSpot }
         func points(_ frame: CapturedFrame) -> SIMD2<Float> {
-            SIMD2(Float(frame.width), Float(frame.height)) / overlayPixelsPerPoint
+            SIMD2(Float(frame.width), Float(frame.height)) / frame.pixelsPerPoint
         }
         let extras = ExtraSizes(
             status: images.status.map(points), pinned: images.pinned.map(points),
@@ -543,7 +549,7 @@ final class FrameLoop: @unchecked Sendable {
     private var settleTask: Task<Void, Never>?
     private var displaysTask: Task<Void, Never>?
     private var timers: [Timer] = []
-    private let statusStrip: StatusStrip
+    private let dashboard: Dashboard
     private let pointerImage: PointerImage
     private var pinnedCapture: ScreenCapture?
     /// The window being pinned and its size in points.
@@ -561,10 +567,10 @@ final class FrameLoop: @unchecked Sendable {
         self.tracking = tracking
         device = renderer.device
 
-        statusStrip = StatusStrip(device: renderer.device)
+        dashboard = Dashboard(device: renderer.device)
         pointerImage = PointerImage(device: renderer.device)
         let frameLoop = FrameLoop(
-            shared: shared, tracking: tracking, renderer: renderer, status: statusStrip.latest,
+            shared: shared, tracking: tracking, renderer: renderer, status: dashboard.latest,
             pointer: pointerImage.latest)
         displayLink = DisplayLinkThread { drawable, presentingAt, deadline in
             frameLoop.render(to: drawable, presentingAt: presentingAt, deadline: deadline)
@@ -605,7 +611,7 @@ final class FrameLoop: @unchecked Sendable {
         }
         timers = [
             every(captureRateInterval) { $0.updateCaptureRates() },
-            every(statusInterval) { $0.updateStatusStrip() },
+            every(statusInterval) { $0.updateDashboard() },
             every(pointerInterval) { $0.updatePointer() },
             every(pinnedCheckInterval) { $0.checkPinnedWindow() },
         ]
@@ -725,7 +731,7 @@ final class FrameLoop: @unchecked Sendable {
         case .toggleFullScreenWindow:
             window.fullScreen = shared.mutex.withLock { $0.settings.fullScreenWindow }
             window.place()
-        case .toggleStatusStrip: updateStatusStrip()
+        case .toggleStatusStrip: updateDashboard()
         case .toggleLivePointer: updatePointer()
         default: break
         }
@@ -1039,20 +1045,19 @@ final class FrameLoop: @unchecked Sendable {
 
     // MARK: Above the canvas
 
-    private func updateStatusStrip() {
+    private func updateDashboard() {
         let (enabled, info) = shared.mutex.withLock { ($0.settings.statusStrip, $0.hudInfo(now: monotonicNow())) }
         guard enabled, glassesConnected else {
-            statusStrip.show(nil)
+            dashboard.update(glasses: nil)
             return
         }
         let tracking = info.tracking
-        let readings = StatusReadings(
-            clock: Date.now.formatted(date: .omitted, time: .shortened), battery: Battery.now(),
-            cpuLoad: statusStrip.cpuLoad(), memory: MemoryUse.now(), glassesTemperature: tracking.temperature,
-            trackingHz: tracking.status == .connected ? tracking.sampleRateHz : nil, fps: info.stats.fps,
-            latency: info.timing.lastLead.map { $0 + glassesDisplayDelay },
-            lateFramesPerSecond: info.timing.lateFramesPerSecond(now: info.now))
-        statusStrip.show(statusItems(readings))
+        dashboard.update(
+            glasses: GlassesReadings(
+                temperature: tracking.temperature,
+                trackingHz: tracking.status == .connected ? tracking.sampleRateHz : nil, fps: info.stats.fps,
+                latency: info.timing.lastLead.map { $0 + glassesDisplayDelay },
+                lateFramesPerSecond: info.timing.lateFramesPerSecond(now: info.now)))
     }
 
     private func updatePointer() {
@@ -1082,7 +1087,7 @@ final class FrameLoop: @unchecked Sendable {
         else { return }
         do {
             let capture = try ScreenCapture(device: device)
-            try await capture.start(window: found, pixelSize: Self.pinnedPixels(found.frame.size), fps: pinnedFps)
+            try await capture.start(window: found, fps: pinnedFps, maxPixels: maxPinnedPixels)
             guard !Task.isCancelled else {
                 await capture.stop()
                 return
@@ -1112,16 +1117,8 @@ final class FrameLoop: @unchecked Sendable {
         }
         if frame.size != target.size {
             pinnedTarget = (target.id, frame.size)
-            Task { await capture.setPixelSize(Self.pinnedPixels(frame.size)) }
+            Task { await capture.resizeWindow(to: frame.size) }
         }
-    }
-
-    /// Pixels to capture a window `size` points large at, as crisp as the
-    /// rest of what is drawn with the canvas.
-    private static func pinnedPixels(_ size: CGSize) -> (width: Int, height: Int) {
-        let scale = CGFloat(overlayPixelsPerPoint)
-        let fit = min(1, maxPinnedPixels / max(size.width * scale, size.height * scale, 1))
-        return (max(Int(size.width * scale * fit), 1), max(Int(size.height * scale * fit), 1))
     }
 
     // MARK: Keys

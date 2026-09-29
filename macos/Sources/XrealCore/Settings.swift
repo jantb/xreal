@@ -67,7 +67,8 @@ public struct Settings: Equatable, Sendable {
     /// Draws the mouse pointer where the mouse is as each frame is drawn,
     /// instead of where it was when the canvas was captured.
     public var livePointer = true
-    /// Shows a line of status above the canvas.
+    /// Shows the dashboard above the canvas. Saved as `status_strip`, from
+    /// when it was a line of text.
     public var statusStrip = true
     public var pinnedWindow: PinnedWindow?
 

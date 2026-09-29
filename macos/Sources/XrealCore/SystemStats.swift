@@ -73,10 +73,13 @@ public struct Battery: Equatable, Sendable {
     public var percent: Int
     /// On the charger, charging or full.
     public var charging: Bool
+    /// Minutes until empty, or until full while charging, when macOS knows.
+    public var minutesLeft: Int?
 
-    public init(percent: Int, charging: Bool) {
+    public init(percent: Int, charging: Bool, minutesLeft: Int? = nil) {
         self.percent = percent
         self.charging = charging
+        self.minutesLeft = minutesLeft
     }
 
     public static func now() -> Battery? {
@@ -92,7 +95,13 @@ public struct Battery: Equatable, Sendable {
                 let maximum = description[kIOPSMaxCapacityKey] as? Int, maximum > 0
             else { continue }
             let onCharger = description[kIOPSPowerSourceStateKey] as? String == kIOPSACPowerValue
-            return Battery(percent: min(max(capacity * 100 / maximum, 0), 100), charging: onCharger)
+            let minutes =
+                onCharger
+                ? description[kIOPSTimeToFullChargeKey] as? Int
+                : description[kIOPSTimeToEmptyKey] as? Int
+            return Battery(
+                percent: min(max(capacity * 100 / maximum, 0), 100), charging: onCharger,
+                minutesLeft: minutes.flatMap { $0 > 0 ? $0 : nil })
         }
         return nil
     }

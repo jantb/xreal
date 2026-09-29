@@ -219,7 +219,12 @@ private func turnSeen(framesLate late: Double) throws -> Float {
     let room = try #require(state.frame(extras: extras).room)
     let status = try #require(room.panels.first { $0.source == .status })
     let pinned = try #require(room.panels.first { $0.source == .pinned })
-    #expect(status.rect.bottom > 1 && pinned.rect.bottom > status.rect.top)
+    let canvasTop = try #require(room.panels.first { $0.tile != nil }).surface.point(at: SIMD2(0, 1))
+    // Seen above the canvas's top edge.
+    let elevation = { (point: SIMD3<Float>) in atan2(point.y, simd_length(SIMD2(point.x, point.z))) }
+    for panel in [status, pinned] {
+        #expect(elevation(panel.surface.point(at: SIMD2(0, panel.rect.bottom))) > elevation(canvasTop))
+    }
 
     state.settings.statusStrip = false
     let without = try #require(state.frame(extras: extras).room)

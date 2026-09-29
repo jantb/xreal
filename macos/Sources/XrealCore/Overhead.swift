@@ -1,10 +1,10 @@
 import Foundation
 import simd
 
-// Points between the canvas's top edge and the status strip.
+// Points between the canvas's top edge and what hangs above it.
 private let overheadGap: Float = 48
-// Points between the status strip and the pinned window above it.
-private let overheadSpacing: Float = 24
+// Points between the dashboard and the pinned window.
+private let overheadSpacing: Float = 32
 
 /// A part of a screen's surface, in its positions: from -1 to 1 across, and
 /// from -1 at the bottom to 1 at the top, beyond 1 above it. The surface
@@ -27,25 +27,68 @@ public struct SurfaceRect: Equatable, Sendable {
     public static let whole = SurfaceRect(left: -1, right: 1, top: 1, bottom: -1)
 }
 
-/// Where the status strip and the pinned window hang, `strip` and `pinned`
-/// points in size: above the canvas's top edge, centred on it, the strip
-/// nearest and the window above the strip. Either is shrunk to the canvas's
-/// width if it is wider.
-public func overheadLayout(canvas: RoomScreen, strip: SIMD2<Float>?, pinned: SIMD2<Float>?)
-    -> (strip: SurfaceRect?, pinned: SurfaceRect?)
-{
-    let size = SIMD2(Float(max(canvas.width, 1)), Float(max(canvas.height, 1)))
-    var bottom = 1 + overheadGap * 2 / size.y
-    func place(_ extent: SIMD2<Float>?) -> SurfaceRect? {
+/// Where the dashboard and the pinned window hang above the canvas: how
+/// tall the row they hang in is, in points, and where each is in it, on
+/// `overheadSurface`.
+public struct OverheadLayout: Equatable, Sendable {
+    public var height: Float
+    public var dashboard: SurfaceRect?
+    public var pinned: SurfaceRect?
+}
+
+/// Lays out the dashboard and the pinned window, `dashboard` and `pinned`
+/// points in size: the dashboard centred and the window beside it on the
+/// right, both resting on the row's bottom edge. Where the canvas is too
+/// narrow for both, the window goes above the dashboard instead; either is
+/// shrunk to the canvas's width if it is wider.
+public func overheadLayout(canvas: RoomScreen, dashboard: SIMD2<Float>?, pinned: SIMD2<Float>?) -> OverheadLayout {
+    let width = Float(max(canvas.width, 1))
+    func fitted(_ extent: SIMD2<Float>?) -> SIMD2<Float>? {
         guard let extent, extent.x > 0, extent.y > 0 else { return nil }
-        let fitted = extent * min(1, size.x / extent.x)
-        let half = fitted.x / size.x
-        let rect = SurfaceRect(left: -half, right: half, top: bottom + fitted.y * 2 / size.y, bottom: bottom)
-        bottom = rect.top + overheadSpacing * 2 / size.y
-        return rect
+        return extent * min(1, width / extent.x)
     }
-    let stripRect = place(strip)
-    return (stripRect, place(pinned))
+    let board = fitted(dashboard)
+    let window = fitted(pinned)
+    let beside = board.map { board in window.map { board.x / 2 + overheadSpacing + $0.x <= width / 2 } ?? true } ?? true
+    let height: Float
+    if let board, let window {
+        height = beside ? max(board.y, window.y) : board.y + overheadSpacing + window.y
+    } else {
+        height = board?.y ?? window?.y ?? 0
+    }
+    guard height > 0 else { return OverheadLayout(height: 0) }
+    // Points across from the middle and up from the row's bottom edge, to
+    // surface positions.
+    func rect(left: Float, bottom: Float, _ extent: SIMD2<Float>) -> SurfaceRect {
+        SurfaceRect(
+            left: left * 2 / width, right: (left + extent.x) * 2 / width, top: -1 + (bottom + extent.y) * 2 / height,
+            bottom: -1 + bottom * 2 / height)
+    }
+    let boardRect = board.map { rect(left: -$0.x / 2, bottom: 0, $0) }
+    let windowRect = window.map { window -> SurfaceRect in
+        guard let board else { return rect(left: -window.x / 2, bottom: 0, window) }
+        return beside
+            ? rect(left: board.x / 2 + overheadSpacing, bottom: 0, window)
+            : rect(left: -window.x / 2, bottom: board.y + overheadSpacing, window)
+    }
+    return OverheadLayout(height: height, dashboard: boardRect, pinned: windowRect)
+}
+
+/// The surface of the row `height` points tall above the canvas: as wide as
+/// the canvas and curved like it, just above its top edge, and tilted to
+/// face the viewer, like a monitor hung overhead and angled down.
+public func overheadSurface(canvas: RoomScreen, curveRadius: Float = 1, height: Float) -> ScreenSurface {
+    let canvasSurface = canvas.surface(curveRadius: curveRadius)
+    let distance = canvas.placement.distance
+    let halfCanvas = Float(canvas.height) * roomUnitsPerPixel / 2
+    let halfRow = max(height, 1) * roomUnitsPerPixel / 2
+    // Turned up from the canvas's middle until its bottom edge is just
+    // above the canvas's top edge.
+    let raise = atan((halfCanvas + overheadGap * roomUnitsPerPixel) / distance) + atan(halfRow / distance)
+    return ScreenSurface(
+        center: SIMD3(0, 0, -distance), right: SIMD3(Float(canvas.width) * roomUnitsPerPixel / 2, 0, 0),
+        up: SIMD3(0, halfRow, 0), halfArc: canvasSurface.halfArc,
+        spin: canvas.placement.orientation * simd_quatf(angle: raise, axis: SIMD3(1, 0, 0)))
 }
 
 /// Where a pointer image `size` points large, with its hot spot `hotSpot`
@@ -61,67 +104,3 @@ public func pointerRect(canvas: RoomScreen, at point: SIMD2<Float>, size: SIMD2<
         left: topLeft.x * 2 - 1, right: bottomRight.x * 2 - 1, top: 1 - topLeft.y * 2, bottom: 1 - bottomRight.y * 2)
 }
 
-/// What the status strip tells, each nil when not known.
-public struct StatusReadings: Sendable {
-    /// The time of day, already formatted.
-    public var clock: String
-    public var battery: Battery?
-    /// Share of the CPU in use, 0 to 1.
-    public var cpuLoad: Float?
-    public var memory: MemoryUse?
-    /// The glasses' IMU temperature, °C.
-    public var glassesTemperature: Float?
-    /// Head tracking samples per second, nil while the glasses are not found.
-    public var trackingHz: Float?
-    /// Frames drawn per second.
-    public var fps: Float
-    /// Seconds from sampling the head pose to the frame reaching the
-    /// glasses.
-    public var latency: Double?
-    public var lateFramesPerSecond: Float
-
-    public init(
-        clock: String, battery: Battery? = nil, cpuLoad: Float? = nil, memory: MemoryUse? = nil,
-        glassesTemperature: Float? = nil, trackingHz: Float? = nil, fps: Float = 0, latency: Double? = nil,
-        lateFramesPerSecond: Float = 0
-    ) {
-        self.clock = clock
-        self.battery = battery
-        self.cpuLoad = cpuLoad
-        self.memory = memory
-        self.glassesTemperature = glassesTemperature
-        self.trackingHz = trackingHz
-        self.fps = fps
-        self.latency = latency
-        self.lateFramesPerSecond = lateFramesPerSecond
-    }
-}
-
-/// The status strip's items, left to right. Readings that are not known
-/// are left out.
-public func statusItems(_ readings: StatusReadings) -> [String] {
-    var items = [readings.clock]
-    if let battery = readings.battery {
-        items.append("Battery \(battery.percent)%" + (battery.charging ? ", charging" : ""))
-    }
-    if let load = readings.cpuLoad {
-        items.append(String(format: "CPU %.0f%%", load * 100))
-    }
-    if let memory = readings.memory {
-        let gigabytes = { (bytes: UInt64) in Double(bytes) / 1_073_741_824 }
-        items.append(String(format: "RAM %.1f of %.0f GB", gigabytes(memory.used), gigabytes(memory.total)))
-    }
-    if let temperature = readings.glassesTemperature {
-        items.append(String(format: "Glasses %.1f °C", temperature))
-    }
-    items.append(readings.trackingHz.map { String(format: "Tracking %.0f Hz", $0) } ?? "Tracking lost")
-    var frames = String(format: "%.0f fps", readings.fps)
-    if let latency = readings.latency {
-        frames += String(format: ", %.0f ms", latency * 1000)
-    }
-    if readings.lateFramesPerSecond > 0 {
-        frames += String(format: ", %.1f late/s", readings.lateFramesPerSecond)
-    }
-    items.append(frames)
-    return items
-}

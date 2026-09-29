@@ -8,17 +8,18 @@ import XrealCore
     _ = try Renderer()
 }
 
-@MainActor @Test func theStatusStripShowsItsItemsAndNothingOnceHidden() throws {
+@Test func theDashboardShowsTilesAndNothingOnceHidden() throws {
     let device = try #require(MTLCreateSystemDefaultDevice())
-    let strip = StatusStrip(device: device)
-    strip.show(["14:05", "CPU 12%"])
-    let short = try #require(strip.latest.current().frame)
-    strip.show(["14:05", "CPU 12%", "RAM 18.0 of 32 GB", "Tracking 1000 Hz"])
-    let long = try #require(strip.latest.current().frame)
-    #expect(long.width > short.width)
-    #expect(long.height == short.height)
-    strip.show(nil)
-    #expect(strip.latest.current().frame == nil)
+    let dashboard = Dashboard(device: device)
+    let glasses = GlassesReadings(temperature: 31, trackingHz: 1000, fps: 90, latency: 0.02, lateFramesPerSecond: 0)
+    dashboard.update(glasses: glasses)
+    dashboard.settle()
+    let image = try #require(dashboard.latest.current().frame)
+    // A row of tiles: far wider than tall, drawn at its points' density.
+    #expect(image.width > 4 * image.height)
+    #expect(image.pixelsPerPoint == overlayPixelsPerPoint)
+    dashboard.update(glasses: nil)
+    #expect(dashboard.latest.current().frame == nil)
 }
 
 @MainActor @Test func thePointerIsPickedUpAsAnImageWithItsHotSpotInside() throws {

@@ -11,12 +11,16 @@ final class CapturedFrame: @unchecked Sendable {
     let texture: MTLTexture
     let width: Int
     let height: Int
+    /// How many of its pixels make a point, for images shown at their size
+    /// in points.
+    let pixelsPerPoint: Float
     // Keeps the IOSurface out of ScreenCaptureKit's reuse pool while in use.
     private let backing: CVMetalTexture?
 
-    init(texture: MTLTexture, backing: CVMetalTexture? = nil) {
+    init(texture: MTLTexture, backing: CVMetalTexture? = nil, pixelsPerPoint: Float = 1) {
         self.texture = texture
         self.backing = backing
+        self.pixelsPerPoint = pixelsPerPoint
         width = texture.width
         height = texture.height
     }
@@ -56,11 +60,16 @@ enum CaptureError: LocalizedError {
 /// `latest`.
 final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     let latest = LatestFrame()
+    /// Pixels per point of what is captured, given to every frame.
+    private let pixelsPerPoint = Mutex<Float>(1)
     private let queue = DispatchQueue(label: "xreal.capture", qos: .userInteractive)
     private let textureCache: CVMetalTextureCache
     @MainActor private var stream: SCStream?
     @MainActor private var configuration: SCStreamConfiguration?
     @MainActor private(set) var fps = 0
+    /// The captured window's size in points and density, and the longest
+    /// side allowed, while capturing a window.
+    @MainActor private var windowCapture: (size: CGSize, scale: CGFloat, maxPixels: CGFloat)?
 
     init(device: MTLDevice) throws {
         var cache: CVMetalTextureCache?
@@ -96,23 +105,44 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     }
 
     /// Captures just `window`, wherever it is and whatever covers it, at
-    /// `pixelSize`.
-    @MainActor func start(window: SCWindow, pixelSize: (width: Int, height: Int), fps: Int) async throws {
-        let configuration = Self.configuration(pixelSize: pixelSize, fps: fps, showsCursor: false)
+    /// its own pixel density but at most `maxPixels` on its longer side.
+    @MainActor func start(window: SCWindow, fps: Int, maxPixels: CGFloat) async throws {
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let scale = Self.pixelScale(of: filter)
+        let pixels = Self.pixelSize(of: window.frame.size, scale: scale, maxPixels: maxPixels)
+        let configuration = Self.configuration(pixelSize: pixels, fps: fps, showsCursor: false)
+        // Shown at the window's size in points, however many pixels it has.
+        pixelsPerPoint.withLock { $0 = Float(pixels.width) / Float(max(window.frame.width, 1)) }
         configuration.ignoreShadowsSingleWindow = true
-        try await start(filter: SCContentFilter(desktopIndependentWindow: window), configuration: configuration)
+        // The window fills the whole image, whatever density it is drawn at.
+        configuration.scalesToFit = true
+        try await start(filter: filter, configuration: configuration)
+        windowCapture = (window.frame.size, scale, maxPixels)
     }
 
-    /// Captures at `pixelSize` from now on.
-    @MainActor func setPixelSize(_ pixelSize: (width: Int, height: Int)) async {
-        guard let stream, let configuration else { return }
-        configuration.width = pixelSize.width
-        configuration.height = pixelSize.height
+    /// Follows the captured window to `size`, in points.
+    @MainActor func resizeWindow(to size: CGSize) async {
+        guard let stream, let configuration, let window = windowCapture, window.size != size else { return }
+        windowCapture?.size = size
+        let pixels = Self.pixelSize(of: size, scale: window.scale, maxPixels: window.maxPixels)
+        pixelsPerPoint.withLock { $0 = Float(pixels.width) / Float(max(size.width, 1)) }
+        configuration.width = pixels.width
+        configuration.height = pixels.height
         do {
             try await stream.updateConfiguration(configuration)
         } catch {
             eprint("Could not change the capture size: \(error.localizedDescription)")
         }
+    }
+
+    /// Pixels per point of the display `filter`'s content is on.
+    private static func pixelScale(of filter: SCContentFilter) -> CGFloat {
+        max(CGFloat(SCShareableContent.info(for: filter).pointPixelScale), 1)
+    }
+
+    private static func pixelSize(of size: CGSize, scale: CGFloat, maxPixels: CGFloat) -> (width: Int, height: Int) {
+        let fit = min(1, maxPixels / max(size.width * scale, size.height * scale, 1))
+        return (max(Int(size.width * scale * fit), 1), max(Int(size.height * scale * fit), 1))
     }
 
     private static func configuration(pixelSize: (width: Int, height: Int), fps: Int, showsCursor: Bool)
@@ -195,7 +225,8 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             nil, textureCache, pixelBuffer, nil, .bgra8Unorm_srgb, CVPixelBufferGetWidth(pixelBuffer),
             CVPixelBufferGetHeight(pixelBuffer), 0, &backing)
         guard let backing, let texture = CVMetalTextureGetTexture(backing) else { return }
-        latest.publish(CapturedFrame(texture: texture, backing: backing))
+        latest.publish(
+            CapturedFrame(texture: texture, backing: backing, pixelsPerPoint: pixelsPerPoint.withLock { $0 }))
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

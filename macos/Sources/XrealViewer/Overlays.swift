@@ -9,12 +9,6 @@ import XrealCore
 /// filtered down smoothly on a plain one.
 let overlayPixelsPerPoint: Float = 2
 
-// The status strip's text size and height, in points.
-private let statusFontSize: CGFloat = 20
-private let statusHeight: CGFloat = 36
-private let statusPadding: CGFloat = 14
-private let statusSeparator = "      "
-
 /// A value shared between threads behind a lock.
 final class Guarded<Value: Sendable>: Sendable {
     let mutex: Mutex<Value>
@@ -26,7 +20,7 @@ final class Guarded<Value: Sendable>: Sendable {
 
 /// A premultiplied BGRA bitmap of `width` × `height` pixels drawn by `draw`
 /// into a context with the origin at its bottom left.
-@MainActor private func drawBitmap(width: Int, height: Int, draw: (CGContext) -> Void) -> Data? {
+func drawBitmap(width: Int, height: Int, draw: (CGContext) -> Void) -> Data? {
     guard width > 0, height > 0, let space = CGColorSpace(name: CGColorSpace.sRGB),
         let context = CGContext(
             data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: space,
@@ -41,7 +35,7 @@ final class Guarded<Value: Sendable>: Sendable {
 }
 
 /// `bitmap`, from `drawBitmap`, as an image to draw.
-private func image(of bitmap: Data, width: Int, height: Int, device: MTLDevice) -> CapturedFrame? {
+func image(of bitmap: Data, width: Int, height: Int, device: MTLDevice) -> CapturedFrame? {
     let descriptor = MTLTextureDescriptor.texture2DDescriptor(
         pixelFormat: .bgra8Unorm_srgb, width: width, height: height, mipmapped: false)
     descriptor.usage = .shaderRead
@@ -51,59 +45,7 @@ private func image(of bitmap: Data, width: Int, height: Int, device: MTLDevice) 
             region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, withBytes: bytes.baseAddress!,
             bytesPerRow: width * 4)
     }
-    return CapturedFrame(texture: texture)
-}
-
-/// The line of status above the canvas, redrawn only when what it says
-/// changes.
-@MainActor final class StatusStrip {
-    let latest = LatestFrame()
-    private let device: MTLDevice
-    private var shown: [String]?
-    private var ticks: CpuTicks?
-
-    init(device: MTLDevice) {
-        self.device = device
-    }
-
-    /// The share of the CPU used since the last call.
-    func cpuLoad() -> Float? {
-        let now = CpuTicks.now()
-        defer { ticks = now }
-        guard let now, let ticks else { return nil }
-        return now.load(since: ticks)
-    }
-
-    /// Shows `items`, or nothing when nil.
-    func show(_ items: [String]?) {
-        guard items != shown else { return }
-        shown = items
-        guard let items else {
-            latest.publish(nil)
-            return
-        }
-        let text = NSAttributedString(
-            string: items.joined(separator: statusSeparator),
-            attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: statusFontSize, weight: .medium),
-                .foregroundColor: NSColor(white: 0.85, alpha: 1),
-            ])
-        let size = CGSize(width: (text.size().width + 2 * statusPadding).rounded(.up), height: statusHeight)
-        let scale = CGFloat(overlayPixelsPerPoint)
-        let (width, height) = (Int(size.width * scale), Int(size.height * scale))
-        let bitmap = drawBitmap(width: width, height: height) { context in
-            context.scaleBy(x: scale, y: scale)
-            // A faint frame, so the strip reads as one thing. Black shows
-            // nothing in the glasses.
-            let frame = CGRect(origin: .zero, size: size).insetBy(dx: 1, dy: 1)
-            context.setStrokeColor(CGColor(gray: 0.3, alpha: 1))
-            context.setLineWidth(1.5)
-            context.addPath(CGPath(roundedRect: frame, cornerWidth: 8, cornerHeight: 8, transform: nil))
-            context.strokePath()
-            text.draw(at: CGPoint(x: statusPadding, y: (size.height - text.size().height) / 2))
-        }
-        latest.publish(bitmap.flatMap { image(of: $0, width: width, height: height, device: device) })
-    }
+    return CapturedFrame(texture: texture, pixelsPerPoint: overlayPixelsPerPoint)
 }
 
 /// The system's current mouse pointer as an image, for drawing it where the

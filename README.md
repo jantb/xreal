@@ -47,11 +47,12 @@ Global shortcuts (⌃⌥⌘ plus a key):
 | F | Fit the focused window to the zone you look at |
 | M | Move the pointer to where you look |
 
-Above the canvas, where you see it by looking up, hang a status line (clock,
-battery, CPU, memory, the glasses' temperature, head tracking, frame rate and
-latency) and, if you pick one in the controls, a pinned window from any app.
-The pinned window can stay anywhere, even on the glasses' own display behind
-the view.
+Above the canvas, where you see it by looking up, hangs a row tilted to face
+you: a dashboard updated ten times a second (time and thermal state, CPU per
+core, memory, GPU, network, disk space and traffic, power draw, battery, the
+busiest apps, the glasses and latency), and beside it, if you pick one in the
+controls, a pinned window from any app. The pinned window can stay anywhere,
+even on the glasses' own display behind the view.
 
 ## Latency
 
@@ -76,7 +77,8 @@ may let macOS skip compositing (it needs "Displays have separate Spaces").
 
 Settings are kept in `~/Library/Application Support/xreal/settings.txt`.
 Diagnostic commands: `--probe`, `--probe-sizes`, `--probe-mode`, `--dump-config`,
-`--record SECONDS FILE` (raw IMU samples as CSV; quit the viewer first).
+`--record SECONDS FILE` (raw IMU samples as CSV; quit the viewer first),
+`--dashboard FILE` (the dashboard as a PNG, with how long an update takes).
 
 ## Things to know
 

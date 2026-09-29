@@ -363,7 +363,7 @@ public struct RoomView: Sendable {
         public enum Source: Equatable, Sendable {
             /// The capture of this tile of the canvas.
             case canvas(Int)
-            /// The status strip above the canvas.
+            /// The dashboard above the canvas.
             case status
             /// The window pinned above the canvas.
             case pinned
