@@ -29,6 +29,8 @@ import XrealCore
             source.resume()
             return source
         }
+        // Puts the Mac's screen and the glasses back should the viewer die.
+        Watchdog.start()
         // Keeps macOS from napping or coalescing timers while other apps
         // have focus, which is most of the time.
         activity = ProcessInfo.processInfo.beginActivity(
@@ -70,6 +72,7 @@ import XrealCore
     func applicationWillTerminate(_ notification: Notification) {
         viewer?.saveSettings()
         viewer?.restoreGlasses()
+        Watchdog.quitCleanly()
     }
 
     // The menu bar icon stays to quit from or to bring the window back when
@@ -255,6 +258,11 @@ func record(seconds: Double, path: String) -> Bool {
     }
     print("wrote \(path)")
     return true
+}
+
+if let index = CommandLine.arguments.firstIndex(of: "--watchdog") {
+    guard let viewer = CommandLine.arguments.dropFirst(index + 1).first.flatMap(Int32.init) else { exit(1) }
+    MainActor.assumeIsolated { Watchdog.run(watching: viewer) }
 }
 
 if let index = CommandLine.arguments.firstIndex(of: "--dashboard") {

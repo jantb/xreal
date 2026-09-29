@@ -82,9 +82,12 @@ that repeat every 5.055 s (455 of their refreshes). It comes with the canvas's
 virtual display: with none there are no drops, with it uncaptured about half,
 and neither the canvas's size, rate or place nor the viewer's own settings
 and thread priorities change the period. It also needs the Mac's own screen
-on: with the lid closed there are none. The viewer holds that screen at 60 Hz
-while the glasses are in use, which halves them, and gives it back its own
-rate afterwards. Environment switches, for measuring:
+on: with the lid closed, or the screen switched off, there are none. So the
+viewer switches the Mac's screen off while the glasses are in use (with
+macOS's private display switch, the one display utilities use), or if that is
+turned off or unavailable, holds it at 60 Hz, which halves them. A watchdog, a
+second copy of the viewer started with `--watchdog PID`, brings the screen
+back, and the glasses to their own picture, if the viewer dies. Environment switches, for measuring:
 `XREAL_NO_CANVAS=1` (glasses only), `XREAL_NO_CAPTURE=1` (canvas, not
 captured), `XREAL_NO_REALTIME=1`, `XREAL_FRAME_LATENCY=2` (a frame more slack),
 as in `open --env XREAL_NO_CANVAS=1 "/Applications/XREAL Viewer.app"`.
@@ -116,9 +119,9 @@ Diagnostic commands: `--probe`, `--probe-sizes`, `--probe-mode`, `--dump-config`
   each came up fine when probed on its own. The panic came from many oversize
   displays made in one run. `--probe-sizes --beyond-limit` tries others; save
   everything first.
-- Quitting (or `kill`) puts the glasses back to their own picture. A crash
-  leaves them side by side until they are replugged; `--probe-mode 11`
-  switches them back.
+- Quitting (or `kill`) puts the glasses back to their own picture, and the
+  Mac's own screen back on. If the viewer dies, its watchdog does the same.
+  `--probe-mode 11` switches the glasses back by hand.
 - The Air 2's temple buttons never reach the host, so there are no button
   features.
 - The live pointer is drawn from the system's current pointer image; macOS no

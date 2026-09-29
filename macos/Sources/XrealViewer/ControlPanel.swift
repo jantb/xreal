@@ -343,10 +343,13 @@ private struct ViewSection: View {
             Toggle("Soft Edges", isOn: model.toggle(\.settings.softEdges, .toggleSoftEdges))
             VStack(alignment: .leading) {
                 Toggle(
-                    "Laptop Screen at 60 Hz While Wearing the Glasses",
+                    "Turn Off the Laptop Screen While Wearing the Glasses",
+                    isOn: model.toggle(\.settings.laptopScreenOff, .toggleLaptopScreenOff))
+                Toggle(
+                    "Otherwise Hold It at 60 Hz",
                     isOn: model.toggle(\.settings.steadyLaptopScreen, .toggleSteadyLaptopScreen))
                 Text(
-                    "Alongside the canvas, the laptop's screen makes the glasses drop frames every few seconds; at 60 Hz about half as often, and with the lid closed not at all. Its own rate comes back when the glasses are unplugged, this is turned off or the viewer quits, and after a crash at the next start."
+                    "With the laptop's screen on alongside the canvas, the glasses drop frames every few seconds; at 60 Hz about half as often, switched off not at all. It comes back as it was when the glasses are unplugged, this is turned off or the viewer quits, and if the viewer dies, at once."
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }

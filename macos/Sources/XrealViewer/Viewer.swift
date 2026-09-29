@@ -119,6 +119,7 @@ enum ViewerCommand {
     case toggleEvenTextSize
     case toggleSoftEdges
     case toggleSteadyLaptopScreen
+    case toggleLaptopScreenOff
     /// How far a wrapped canvas bends up and down, 0 to 1.
     case setVerticalWrap(Float)
     /// Picks up (true) or lets go of (false) the canvas, if looked at.
@@ -665,8 +666,9 @@ final class FrameLoop: @unchecked Sendable {
     /// Holds the laptop's screen at 60 Hz while the glasses are in use, if
     /// asked to.
     private func holdLaptopScreen() {
-        let steady = shared.mutex.withLock { $0.settings.steadyLaptopScreen }
-        laptopScreen.hold(steady: steady && Displays.glassesDisplay() != nil)
+        let (off, steady) = shared.mutex.withLock { ($0.settings.laptopScreenOff, $0.settings.steadyLaptopScreen) }
+        let wearing = Displays.glassesDisplay() != nil
+        laptopScreen.update(off: off && wearing, steady: steady && wearing)
     }
 
     func saveSettings() {
@@ -719,6 +721,7 @@ final class FrameLoop: @unchecked Sendable {
             case .toggleEvenTextSize: state.settings.canvas.evenSize.toggle()
             case .toggleSoftEdges: state.settings.softEdges.toggle()
             case .toggleSteadyLaptopScreen: state.settings.steadyLaptopScreen.toggle()
+            case .toggleLaptopScreenOff: state.settings.laptopScreenOff.toggle()
             case .setVerticalWrap(let wrap): state.settings.canvas.verticalWrap = min(max(wrap, 0), 1)
             case .grab(let pickUp):
                 // Saved once it is let go.
@@ -766,7 +769,7 @@ final class FrameLoop: @unchecked Sendable {
         }
         switch command {
         case .toggleStatusStrip: updateDashboard()
-        case .toggleSteadyLaptopScreen: holdLaptopScreen()
+        case .toggleSteadyLaptopScreen, .toggleLaptopScreenOff: holdLaptopScreen()
         case .toggleLivePointer: updatePointer()
         default: break
         }

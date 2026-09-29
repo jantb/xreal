@@ -189,9 +189,11 @@ import simd
     settings.softEdges = false
     settings.canvas.evenSize = false
     settings.steadyLaptopScreen = false
+    settings.laptopScreenOff = false
     let loaded = Settings.parse(settings.serialize())
     #expect(!loaded.steadyLaptopScreen)
-    #expect(Settings().steadyLaptopScreen)
+    #expect(!loaded.laptopScreenOff)
+    #expect(Settings().steadyLaptopScreen && Settings().laptopScreenOff)
     #expect(!loaded.softEdges)
     #expect(!loaded.canvas.evenSize)
     #expect(Settings.parse("").softEdges && Settings.parse("").canvas.evenSize)

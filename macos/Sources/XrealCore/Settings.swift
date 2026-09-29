@@ -72,6 +72,9 @@ public struct Settings: Equatable, Sendable {
     /// Holds the Mac's own screen at 60 Hz while the glasses are in use, as
     /// its ProMotion rate makes the glasses drop frames.
     public var steadyLaptopScreen = true
+    /// Switches the Mac's own screen off while the glasses are in use: with
+    /// it on, the glasses drop frames every few seconds.
+    public var laptopScreenOff = true
     /// How often macOS draws the canvas; one of `canvasRefreshRates`.
     public var canvasRefreshRate = 90
     /// Takes the head pose as late before each frame as the frame's work
@@ -151,6 +154,7 @@ public struct Settings: Equatable, Sendable {
             case "sharp_filtering": parse(value, into: &settings.sharpFiltering)
             case "soft_edges": parse(value, into: &settings.softEdges)
             case "steady_laptop_screen": parse(value, into: &settings.steadyLaptopScreen)
+            case "laptop_screen_off": parse(value, into: &settings.laptopScreenOff)
             case "even_text_size":
                 var even = true
                 parse(value, into: &even)
@@ -210,6 +214,7 @@ public struct Settings: Equatable, Sendable {
             "sharp_filtering=\(sharpFiltering)",
             "soft_edges=\(softEdges)",
             "steady_laptop_screen=\(steadyLaptopScreen)",
+            "laptop_screen_off=\(laptopScreenOff)",
             "live_pointer=\(livePointer)",
             "status_strip=\(statusStrip)",
         ] + (pinnedWindow.map { ["pinned_window=\($0.bundleID)|\($0.title.filter { !$0.isNewline })"] } ?? [])
