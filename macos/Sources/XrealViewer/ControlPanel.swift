@@ -269,6 +269,19 @@ private struct ViewSection: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             .disabled(!model.settings.prediction)
+            VStack(alignment: .leading) {
+                LabeledContent("Steadiness") {
+                    Text(String(format: "%.1f px", model.settings.steadiness)).monospacedDigit()
+                }
+                Slider(
+                    value: Binding(
+                        get: { model.settings.steadiness }, set: { model.perform(.setSteadiness($0)) }),
+                    in: 0...maxSteadiness, step: 0.5)
+                Text(
+                    "Head movements smaller than this, such as your heartbeat, do not move the canvas. Raise it if the image still jolts; lower it if the canvas feels sticky."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
             Toggle("Zoom Out to Show Cursor", isOn: model.toggle(\.settings.followCursor, .toggleFollowCursor))
             Toggle("Correct Lens Distortion", isOn: model.toggle(\.settings.lensCorrection, .toggleLensCorrection))
         }

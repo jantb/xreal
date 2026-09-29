@@ -95,6 +95,7 @@ enum ViewerCommand {
     case toggleFollowCursor
     case toggleDiagnostics
     case setLatencyTrim(Float)
+    case setSteadiness(Float)
     case setCurveRadius(Float)
     case toggleLensCorrection
     case setDepthScale(Float)
@@ -250,7 +251,7 @@ struct ViewerState: Sendable {
             drift.reset()
             viewport.recenter(pose)
         }
-        viewport.track(pose: pose)
+        viewport.track(pose: pose, steadyPixels: settings.steadiness)
         var room = roomView(now: now, dt: dt, output: output, frameSizes: frameSizes, cursor: cursor)
         if settings.prediction {
             let end = snapshot.predict(now: now, lead: lead + scanoutTime)
@@ -535,6 +536,7 @@ final class FrameLoop: @unchecked Sendable {
             case .toggleRoll: state.viewport.followsRoll.toggle()
             case .toggleFollowCursor: state.settings.followCursor.toggle()
             case .toggleDiagnostics: state.settings.diagnosticsVisible.toggle()
+            case .setSteadiness(let pixels): state.settings.steadiness = min(max(pixels, 0), maxSteadiness)
             case .setLatencyTrim(let ms): state.settings.latencyTrimMs = min(max(ms, 0), maxLatencyTrimMs)
             case .toggleLensCorrection: state.settings.lensCorrection.toggle()
             case .setDepthScale(let metres): state.settings.metresPerRoomUnit = metres

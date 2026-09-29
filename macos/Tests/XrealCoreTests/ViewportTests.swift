@@ -71,7 +71,7 @@ private let farCorner = SIMD2<Float>(5500, 2000)
         viewport.track(pose: HeadPose(yaw: yaw))
         let ahead = viewport.headRotation * SIMD3(0, 0, -1)
         // At most the few pixels of wobble the view ignores behind.
-        #expect(abs(atan2(-ahead.x, -ahead.z) - yaw) <= steadyRadius + 1e-5, "yaw \(yaw)")
+        #expect(abs(atan2(-ahead.x, -ahead.z) - yaw) <= steadyRadius(pixels: defaultSteadiness) + 1e-5, "yaw \(yaw)")
     }
 }
 
@@ -98,7 +98,7 @@ private let farCorner = SIMD2<Float>(5500, 2000)
     viewport.track(pose: HeadPose(yaw: 0.2, pitch: 0.1, roll: 0))
     let up = viewport.headRotation * SIMD3(0, 1, 0)
     // The head's up is the room's up again: the canvas looks level.
-    #expect(simd_distance(up, SIMD3(0, 1, 0)) <= steadyRadius + 1e-4, "up \(up)")
+    #expect(simd_distance(up, SIMD3(0, 1, 0)) <= steadyRadius(pixels: defaultSteadiness) + 1e-4, "up \(up)")
 }
 
 @Test func tiltingTheHeadKeepsTheCanvasLevelUnlessTurnedOff() {
@@ -113,4 +113,22 @@ private let farCorner = SIMD2<Float>(5500, 2000)
     // Right ear down: the room's horizontal line rises on the right.
     #expect(rightInView(followRoll: true).y > 0.1)
     #expect(abs(rightInView(followRoll: false).y) < 1e-6)
+}
+
+@Test func aSteadierCanvasIgnoresBiggerWobbleThanALooseOne() {
+    func moves(steadyPixels: Float, wobblePixels: Float) -> Bool {
+        var viewport = ViewportController(settings: Settings())
+        viewport.recenter(HeadPose())
+        viewport.track(pose: HeadPose(), steadyPixels: steadyPixels)
+        let settled = viewport.headRotation
+        let wobble = wobblePixels * horizontalFov / 1920
+        for yaw in [wobble, -wobble, wobble, 0] {
+            viewport.track(pose: HeadPose(yaw: yaw, pitch: yaw), steadyPixels: steadyPixels)
+            if viewport.headRotation != settled { return true }
+        }
+        return false
+    }
+    // A jolt of a few pixels, as a heartbeat gives.
+    #expect(moves(steadyPixels: 2, wobblePixels: 4))
+    #expect(!moves(steadyPixels: 8, wobblePixels: 4))
 }

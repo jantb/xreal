@@ -276,8 +276,47 @@ private func calmHead(at time: Float, period: Float = 2) -> SIMD3<Float> {
     snapshot.sampledAt = 50
 
     let predicted = snapshot.predict(now: 50, lead: 0.01)
-    #expect(abs(predicted.yaw - 0.11) < 1e-4)
-    #expect(abs(predicted.pitch - 0.195) < 1e-4)
+    // Ahead by about rate × lead, in the direction of the turn.
+    #expect(abs(predicted.yaw - 0.11) < 0.001)
+    #expect(abs(predicted.pitch - 0.195) < 0.001)
+}
+
+@Test func predictionLeavesTinyHeadMotionAlone() {
+    var snapshot = TrackingSnapshot(gyroBias: .zero)
+    snapshot.status = .connected
+    snapshot.pose = HeadPose(yaw: 0.1, pitch: 0.2, roll: 0.05)
+    (snapshot.yawRate, snapshot.pitchRate, snapshot.rollRate) = (0.02, -0.03, 0.02)
+    snapshot.sampledAt = 50
+    let predicted = snapshot.predict(now: 50, lead: 0.04)
+    #expect(abs(predicted.yaw - snapshot.pose.yaw) < 1e-6)
+    #expect(abs(predicted.pitch - snapshot.pose.pitch) < 1e-6)
+    #expect(abs(predicted.roll - snapshot.pose.roll) < 1e-6)
+}
+
+@Test func aHeartbeatJoltIsNotMagnifiedByPrediction() {
+    var fusion = Fusion()
+    var bias = GyroBiasEstimator(bias: .zero)
+    var snapshot = TrackingSnapshot(gyroBias: .zero)
+    snapshot.status = .connected
+    snapshot.sampledAt = 10
+    var t: UInt64 = 1_000
+    var worst: Float = 0
+    // A nod of 0.04° in about 30 ms every 0.85 s, as a pulse moves the head.
+    let peakRate = 0.04 * Float.pi / 180 * (2 * .pi / 0.03) / 3
+    for step in 0..<6000 {
+        t += 1_000
+        let phase = (Float(step) * dt).truncatingRemainder(dividingBy: 0.85)
+        let jolt: Float = phase < 0.03 ? sin(phase / 0.03 * 2 * .pi) : 0
+        guard let update = fusion.push(
+            gyro: SIMD3(peakRate * jolt, 0, 0), acc: gravityYUp, timestamp: t, bias: &bias)
+        else { continue }
+        snapshot.pose = update.pose
+        (snapshot.yawRate, snapshot.pitchRate, snapshot.rollRate) = (update.yawRate, update.pitchRate, update.rollRate)
+        let predicted = snapshot.predict(now: 10, lead: 0.03)
+        worst = max(worst, abs(predicted.pitch - snapshot.pose.pitch))
+    }
+    // Under a fifth of a glasses pixel.
+    #expect(worst < 0.2 * horizontalFov / 1920, "prediction moved the view \(worst) rad")
 }
 
 @Test func predictionHoldsPoseWhenTrackingIsStale() {

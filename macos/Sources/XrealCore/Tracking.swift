@@ -59,6 +59,11 @@ let rateTimeConstant: Float = 0.004  // seconds
 let maxPredictionAge: Double = 0.05  // seconds
 // Prediction never moves the view further than this ahead of the pose.
 let maxPredictionAngle: Float = 0.14  // rad, about 8°
+// Head motion slower than this is not predicted. Extrapolating a fast
+// transient tens of milliseconds ahead multiplies it several times over, and
+// the small quick jolts of a heartbeat are just that; a deliberate turn is
+// well above it. Above it, prediction is reduced by this much.
+let predictionRateFloor: Float = 0.05  // rad/s, about 3°/s
 
 // Learning from manual recenters: yaw drift between two recenters is
 // assumed to be leftover gyro bias about the vertical axis.
@@ -153,7 +158,11 @@ public struct TrackingSnapshot: Sendable {
             return pose
         }
         let horizon = Float(age + lead)
-        let ahead = { (rate: Float) in min(max(rate * horizon, -maxPredictionAngle), maxPredictionAngle) }
+        // Only the speed beyond the floor is predicted, in the direction of
+        // the motion, so the prediction grows smoothly from nothing.
+        let speed = magnitude(SIMD3(yawRate, pitchRate, rollRate))
+        let share = speed > predictionRateFloor ? (speed - predictionRateFloor) / speed : 0
+        let ahead = { (rate: Float) in min(max(rate * share * horizon, -maxPredictionAngle), maxPredictionAngle) }
         return HeadPose(
             yaw: wrapAngle(pose.yaw + ahead(yawRate)),
             pitch: pose.pitch + ahead(pitchRate),

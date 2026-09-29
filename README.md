@@ -59,7 +59,8 @@ Global shortcuts (⌃⌥⌘ plus a key):
   virtual display API.
 
 Settings are kept in `~/Library/Application Support/xreal/settings.txt`.
-Diagnostic commands: `--probe`, `--probe-sizes`, `--probe-mode`, `--dump-config`.
+Diagnostic commands: `--probe`, `--probe-sizes`, `--probe-mode`, `--dump-config`,
+`--record SECONDS FILE` (raw IMU samples as CSV; quit the viewer first).
 
 ## Things to know
 

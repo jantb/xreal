@@ -165,6 +165,46 @@ func probeMode(_ arguments: [String]) {
     }
 }
 
+/// `--record SECONDS FILE`: writes every IMU sample the glasses send for
+/// `seconds` to `file` as CSV (device time in microseconds, gyro in rad/s,
+/// accelerometer in m/s², temperature in °C), to study the raw signal, such
+/// as what a heartbeat does to it. Quit the viewer first: it holds the glasses.
+@discardableResult
+func record(seconds: Double, path: String) -> Bool {
+    var lines = ["time_us,gx,gy,gz,ax,ay,az,temp_c"]
+    var problem: Error?
+    do {
+        let glasses = try NrealAir()
+        let deadline = monotonicNow() + seconds
+        while monotonicNow() < deadline {
+            do {
+                guard case .accGyro(let sample) = try glasses.readEvent() else { continue }
+                let (g, a) = (sample.gyroscope, sample.accelerometer)
+                lines.append(
+                    "\(sample.timestamp),\(g.x),\(g.y),\(g.z),\(a.x),\(a.y),\(a.z),\(sample.temperature.map { "\($0)" } ?? "")"
+                )
+            } catch GlassesError.timeout {
+                continue
+            }
+        }
+    } catch {
+        problem = error
+    }
+    // What was recorded before an error is still worth keeping.
+    if lines.count > 1 {
+        do {
+            try (lines.joined(separator: "\n") + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+            print("recorded \(lines.count - 1) samples to \(path)")
+        } catch {
+            problem = problem ?? error
+        }
+    }
+    if let problem {
+        print("failed: \(problem)")
+    }
+    return problem == nil
+}
+
 // `--dump-config`: prints the glasses' factory calibration, as JSON.
 if CommandLine.arguments.contains("--dump-config") {
     do {
@@ -173,6 +213,15 @@ if CommandLine.arguments.contains("--dump-config") {
         print("failed: \(error)")
     }
     exit(0)
+}
+
+if let index = CommandLine.arguments.firstIndex(of: "--record") {
+    let rest = Array(CommandLine.arguments[(index + 1)...])
+    guard rest.count >= 2, let seconds = Double(rest[0]) else {
+        print("usage: --record SECONDS FILE")
+        exit(1)
+    }
+    exit(record(seconds: seconds, path: rest[1]) ? 0 : 1)
 }
 
 if let index = CommandLine.arguments.firstIndex(of: "--probe-mode") {
