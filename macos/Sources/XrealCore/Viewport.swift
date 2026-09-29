@@ -9,15 +9,10 @@ import simd
 // in view.
 let horizontalFov: Float = 2 * atan(960 / 2707)  // rad, about 39°
 
-/// The angle of one glasses pixel, in radians.
-let radiansPerGlassesPixel = horizontalFov / 1920
-
-/// The canvas ignores head wobble within this many glasses pixels, so text
-/// holds on the same pixels instead of shimmering as every tremor and
-/// heartbeat moves it a fraction of a pixel.
-func steadyRadius(pixels: Float) -> Float {
-    pixels * radiansPerGlassesPixel
-}
+// The canvas ignores head wobble within this angle, so text holds on the
+// same glasses pixels instead of shimmering as every tremor moves it a
+// fraction of a pixel. About three glasses pixels.
+let steadyRadius: Float = 3 * horizontalFov / 1920  // rad
 
 /// Holds a value still until it moves more than `radius` away, then drags
 /// along behind it at that distance: small wobble is ignored, and a real
@@ -77,13 +72,13 @@ public struct ViewportController: Sendable {
 
     /// Follows the head to `pose`. The canvas turns with the head exactly,
     /// as any delay makes it lag behind, apart from wobble within
-    /// `steadyPixels` glasses pixels.
-    public mutating func track(pose: HeadPose, steadyPixels: Float = defaultSteadiness) {
+    /// `steadyRadius`.
+    public mutating func track(pose: HeadPose) {
         if !initialized {
             recenter(pose)
         }
         let raw = SIMD3(wrapAngle(pose.yaw - center.yaw), pose.pitch - center.pitch, wrapAngle(pose.roll))
-        let steady = leash.follow(raw, radius: steadyRadius(pixels: steadyPixels))
+        let steady = leash.follow(raw, radius: steadyRadius)
         (offsetYaw, offsetPitch, offsetRoll) = (steady.x, steady.y, steady.z)
     }
 

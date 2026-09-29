@@ -141,12 +141,3 @@ import simd
     #expect(Settings.parse("latency_trim_ms=900\n").latencyTrimMs == maxLatencyTrimMs)
     #expect(Settings.parse("latency_trim_ms=nan\n").latencyTrimMs == 0)
 }
-
-@Test func theSteadinessStaysChosenAfterARestartAndStaysInRange() {
-    var settings = Settings()
-    settings.steadiness = 7.5
-    #expect(Settings.parse(settings.serialize()).steadiness == 7.5)
-    #expect(Settings.parse("steadiness_px=-3\n").steadiness == 0)
-    #expect(Settings.parse("steadiness_px=500\n").steadiness == maxSteadiness)
-    #expect(Settings.parse("steadiness_px=nan\n").steadiness == defaultSteadiness)
-}

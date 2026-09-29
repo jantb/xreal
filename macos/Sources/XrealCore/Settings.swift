@@ -1,11 +1,5 @@
 import Foundation
 
-/// How far, in glasses pixels, the head may move before the canvas follows.
-/// Enough to hide the head's tremor and a heartbeat's jolt: a resting pulse
-/// moved the head 3-5 pixels per beat when measured with `--record`.
-public let defaultSteadiness: Float = 6
-public let maxSteadiness: Float = 12
-
 /// The most the prediction lead can be lengthened, in milliseconds.
 public let maxLatencyTrimMs: Float = 40
 
@@ -19,9 +13,6 @@ public struct Settings: Equatable, Sendable {
     /// Milliseconds added to how far ahead the head pose is predicted, to
     /// make up for frames reaching the glasses later than assumed.
     public var latencyTrimMs: Float = 0
-    /// How many glasses pixels the head can move without the canvas
-    /// following, to hide a heartbeat's jolt and other tremor.
-    public var steadiness: Float = defaultSteadiness
     /// Whether the diagnostics are expanded in the controls window. Saved as
     /// `overlay_visible`, from when they were drawn over the picture.
     public var diagnosticsVisible = true
@@ -93,10 +84,6 @@ public struct Settings: Equatable, Sendable {
                 if let trim = Float(value), trim.isFinite {
                     settings.latencyTrimMs = min(max(trim, 0), maxLatencyTrimMs)
                 }
-            case "steadiness_px":
-                if let pixels = Float(value), pixels.isFinite {
-                    settings.steadiness = min(max(pixels, 0), maxSteadiness)
-                }
             case "canvas": canvas = canvas ?? parseScreen(value)
             case "glasses_only_screen": glassesOnlyScreen = glassesOnlyScreen ?? parseScreen(value)
             case "follow_roll": parse(value, into: &settings.followRoll)
@@ -124,7 +111,6 @@ public struct Settings: Equatable, Sendable {
             "prediction=\(prediction)",
             "overlay_visible=\(diagnosticsVisible)",
             "latency_trim_ms=\(latencyTrimMs)",
-            "steadiness_px=\(steadiness)",
             "gyro_bias_x=\(gyroBias.x)",
             "gyro_bias_y=\(gyroBias.y)",
             "gyro_bias_z=\(gyroBias.z)",
