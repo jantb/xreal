@@ -243,6 +243,11 @@ private struct CanvasSection: View {
                 "How often what is on the canvas can change. Head movement is drawn at the glasses' own rate either way; 60 Hz leaves the GPU more room."
             )
             .font(.caption).foregroundStyle(.secondary)
+            VStack(alignment: .leading) {
+                Toggle("Ambient Light", isOn: model.toggle(\.settings.ambientLight, .toggleAmbientLight))
+                Text("Lights the room round the canvas in the colours of its edges, like a TV's backlight.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Toggle("Curved", isOn: model.toggle(\.settings.canvas.curved, .toggleCurved))
                 .disabled(settings.canvas.spherical)
             VStack(alignment: .leading) {

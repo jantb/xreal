@@ -527,6 +527,8 @@ public struct RoomView: Sendable {
             case pinned
             /// The mouse pointer, drawn over the canvas.
             case pointer
+            /// The glow round the canvas, in the colours of its edges.
+            case ambient
         }
 
         public var source: Source
@@ -535,12 +537,19 @@ public struct RoomView: Sendable {
         public var rect: SurfaceRect
         /// Outlined, because the canvas is being carried or was just moved.
         public var highlighted: Bool
+        /// For the glow round the canvas: the canvas's size in points, how
+        /// far out the glow reaches in points, and how bright it is.
+        public var halo: SIMD4<Float>
 
-        public init(source: Source, surface: ScreenSurface, rect: SurfaceRect = .whole, highlighted: Bool = false) {
+        public init(
+            source: Source, surface: ScreenSurface, rect: SurfaceRect = .whole, highlighted: Bool = false,
+            halo: SIMD4<Float> = .zero
+        ) {
             self.source = source
             self.surface = surface
             self.rect = rect
             self.highlighted = highlighted
+            self.halo = halo
         }
 
         /// The part of the canvas's width it covers, from -1 to 1.

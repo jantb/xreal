@@ -190,7 +190,9 @@ import simd
     settings.canvas.evenSize = false
     settings.steadyLaptopScreen = false
     settings.laptopScreenOff = false
+    settings.ambientLight = true
     let loaded = Settings.parse(settings.serialize())
+    #expect(loaded.ambientLight && !Settings().ambientLight)
     #expect(!loaded.steadyLaptopScreen)
     #expect(!loaded.laptopScreenOff)
     #expect(Settings().steadyLaptopScreen && Settings().laptopScreenOff)

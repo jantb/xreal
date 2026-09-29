@@ -54,6 +54,10 @@ let maxViewingDistance: Float = 20
 /// smaller the radius, the stronger the curve.
 let minCurveRadius: Float = 0.5
 let maxCurveRadius: Float = 5
+// How far the glow round the canvas reaches past its edges, in points, and
+// how bright it is at the edge.
+private let ambientReach: Float = 360
+private let ambientBrightness: Float = 0.75
 // How long the canvas stays outlined after it was moved closer or away.
 private let outlineTime = 1.0
 // macOS nudges displays apart after an arrangement is applied; they are
@@ -120,6 +124,7 @@ enum ViewerCommand {
     case toggleSoftEdges
     case toggleSteadyLaptopScreen
     case toggleLaptopScreenOff
+    case toggleAmbientLight
     /// How far a wrapped canvas bends up and down, 0 to 1.
     case setVerticalWrap(Float)
     /// Picks up (true) or lets go of (false) the canvas, if looked at.
@@ -367,6 +372,22 @@ struct ViewerState: Sendable {
         // A canvas still starting up has nothing to show yet.
         room.panels.removeAll { panel in panel.tile.map { $0 >= frameSizes.count || frameSizes[$0] == nil } ?? false }
 
+        // The glow round the canvas, drawn first so everything else lies on it.
+        let surface = canvas.surface(curveRadius: curveRadius)
+        if settings.ambientLight, room.panels.contains(where: { $0.tile != nil }) {
+            let size = SIMD2(Float(canvas.width), Float(canvas.height))
+            let reach = ambientReach * 2 / size
+            let halo = SIMD4(size.x, size.y, ambientReach, ambientBrightness)
+            let sides = [
+                SurfaceRect(left: -1 - reach.x, right: -1, top: 1 + reach.y, bottom: -1 - reach.y),
+                SurfaceRect(left: 1, right: 1 + reach.x, top: 1 + reach.y, bottom: -1 - reach.y),
+                SurfaceRect(left: -1, right: 1, top: 1 + reach.y, bottom: 1),
+                SurfaceRect(left: -1, right: 1, top: -1, bottom: -1 - reach.y),
+            ]
+            room.panels.insert(
+                contentsOf: sides.map { RoomView.Panel(source: .ambient, surface: surface, rect: $0, halo: halo) }, at: 0)
+        }
+
         // Above the canvas, in a row tilted to face the viewer.
         let overhead = overheadLayout(
             canvas: canvas, dashboard: settings.statusStrip ? extras.status : nil, pinned: extras.pinned)
@@ -379,7 +400,6 @@ struct ViewerState: Sendable {
                 room.panels.append(RoomView.Panel(source: .pinned, surface: pinned.surface, rect: pinned.rect))
             }
         }
-        let surface = canvas.surface(curveRadius: curveRadius)
         // The pointer last, over everything it lies on.
         if settings.livePointer, let pointer = extras.pointer, let point = cursor.flatMap(canvasPoint(ofCursor:)) {
             let rect = pointerRect(canvas: canvas, at: point, size: pointer.size, hotSpot: pointer.hotSpot)
@@ -722,6 +742,7 @@ final class FrameLoop: @unchecked Sendable {
             case .toggleSoftEdges: state.settings.softEdges.toggle()
             case .toggleSteadyLaptopScreen: state.settings.steadyLaptopScreen.toggle()
             case .toggleLaptopScreenOff: state.settings.laptopScreenOff.toggle()
+            case .toggleAmbientLight: state.settings.ambientLight.toggle()
             case .setVerticalWrap(let wrap): state.settings.canvas.verticalWrap = min(max(wrap, 0), 1)
             case .grab(let pickUp):
                 // Saved once it is let go.

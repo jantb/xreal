@@ -75,6 +75,8 @@ public struct Settings: Equatable, Sendable {
     /// Switches the Mac's own screen off while the glasses are in use: with
     /// it on, the glasses drop frames every few seconds.
     public var laptopScreenOff = true
+    /// Lights the room round the canvas in the colours of its edges.
+    public var ambientLight = false
     /// How often macOS draws the canvas; one of `canvasRefreshRates`.
     public var canvasRefreshRate = 90
     /// Takes the head pose as late before each frame as the frame's work
@@ -155,6 +157,7 @@ public struct Settings: Equatable, Sendable {
             case "soft_edges": parse(value, into: &settings.softEdges)
             case "steady_laptop_screen": parse(value, into: &settings.steadyLaptopScreen)
             case "laptop_screen_off": parse(value, into: &settings.laptopScreenOff)
+            case "ambient_light": parse(value, into: &settings.ambientLight)
             case "even_text_size":
                 var even = true
                 parse(value, into: &even)
@@ -215,6 +218,7 @@ public struct Settings: Equatable, Sendable {
             "soft_edges=\(softEdges)",
             "steady_laptop_screen=\(steadyLaptopScreen)",
             "laptop_screen_off=\(laptopScreenOff)",
+            "ambient_light=\(ambientLight)",
             "live_pointer=\(livePointer)",
             "status_strip=\(statusStrip)",
         ] + (pinnedWindow.map { ["pinned_window=\($0.bundleID)|\($0.title.filter { !$0.isNewline })"] } ?? [])

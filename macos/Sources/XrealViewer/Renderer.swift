@@ -21,6 +21,7 @@ private let shaderSource = """
         float4 spin0, spin1, spin2;  // turns the upright screen to its tilt
         float4 lens;               // xy: where the lens lookup starts, z: its step, w: 1 to use it
         float4 lensGrid;           // xy: the lookup's columns and rows, zw: the eye's size in pixels
+        float4 halo;               // the glow: xy the canvas's size in points, z how far it reaches, w how bright
     };
 
     struct PanelOut {
@@ -91,6 +92,55 @@ private let shaderSource = """
         return out;
     }
 
+    // The glow round the canvas: the colour of the canvas's nearest edge, as
+    // the small blurred copy of it has it, brightest at the edge and fading
+    // out over `halo.z` points. Light only, added to what is behind.
+    fragment float4 haloFragment(PanelOut in [[stage_in]],
+                                 constant Panel &panel [[buffer(0)]],
+                                 texture2d<float> ambient [[texture(0)]],
+                                 sampler linear [[sampler(0)]]) {
+        float2 inside = clamp(in.screenUV, 0.0, 1.0);
+        float reach = length((in.screenUV - inside) * panel.halo.xy) / panel.halo.z;
+        if (reach >= 1) {
+            return float4(0);
+        }
+        float fall = (1 - reach) * (1 - reach) * exp(-2 * reach);
+        return float4(ambient.sample(linear, inside).rgb * fall * panel.halo.w, 0);
+    }
+
+    // The small blurred copy of the canvas the glow takes its colours from:
+    // one quad per capture tile, span.xy its part of the canvas's width and
+    // span.zw the copy's size in pixels.
+    struct AmbientOut {
+        float4 position [[position]];
+    };
+
+    vertex AmbientOut ambientVertex(uint id [[vertex_id]], constant float4 &span [[buffer(0)]]) {
+        float2 corner = float2(id & 1, id >> 1);
+        AmbientOut out;
+        out.position = float4(mix(span.x, span.y, corner.x) * 2 - 1, 1 - corner.y * 2, 0, 1);
+        return out;
+    }
+
+    // Each pixel of the copy averages the tile over about three of its own
+    // pixels each way, so the glow is smooth.
+    fragment float4 ambientFragment(AmbientOut in [[stage_in]],
+                                    constant float4 &span [[buffer(0)]],
+                                    texture2d<float> source [[texture(0)]],
+                                    sampler linear [[sampler(0)]]) {
+        float2 onCanvas = in.position.xy / span.zw;
+        float width = max(span.y - span.x, 1e-4);
+        float2 uv = float2((onCanvas.x - span.x) / width, onCanvas.y);
+        float2 texel = float2(1 / (span.z * width), 1 / span.w);
+        float3 sum = 0;
+        for (int i = 0; i < 8; i++) {
+            for (int j = 0; j < 8; j++) {
+                sum += source.sample(linear, uv + (float2(i, j) / 7 - 0.5) * 3 * texel).rgb;
+            }
+        }
+        return float4(sum / 64, 1);
+    }
+
     // Catmull-Rom from nine bilinear samples: sharper than one bilinear
     // sample, which blurs by up to half a pixel between source pixels.
     float4 sampleSharp(texture2d<float> source, sampler linear, float2 uv, float2 size) {
@@ -159,6 +209,9 @@ private let shaderSource = """
     }
     """
 
+// The small blurred copy of the canvas the glow round it takes its colours
+// from, in pixels.
+private let ambientSize = SIMD2<Float>(128, 48)
 // Samples a pixel, for smooth edges.
 private let sampleCount = 4
 // Clip distances for the room's depth range, in room units (1 is where the
@@ -189,6 +242,7 @@ struct PanelImages: Sendable {
         case .status: status
         case .pinned: pinned
         case .pointer: pointer
+        case .ambient: nil
         }
     }
 }
@@ -205,6 +259,12 @@ final class Renderer: @unchecked Sendable {
     private let depthState: MTLDepthStencilState
     // The pointer is drawn over the canvas it lies on, whatever the depth.
     private let overDepthState: MTLDepthStencilState
+    // The glow round the canvas, and the small blurred copy of the canvas it
+    // takes its colours from, eased from frame to frame.
+    private let haloPipeline: MTLRenderPipelineState
+    private let ambientPipeline: MTLRenderPipelineState
+    private var ambient: MTLTexture?
+    private var ambientStarted = false
     private let sampler: MTLSamplerState
     // Match the drawable size; recreated when that changes.
     private var sampled: (color: MTLTexture, depth: MTLTexture)?
@@ -237,6 +297,26 @@ final class Renderer: @unchecked Sendable {
         blend.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         panelDescriptor.depthAttachmentPixelFormat = .depth32Float
         panelPipeline = try device.makeRenderPipelineState(descriptor: panelDescriptor)
+        panelDescriptor.fragmentFunction = library.makeFunction(name: "haloFragment")
+        haloPipeline = try device.makeRenderPipelineState(descriptor: panelDescriptor)
+        let ambientDescriptor = MTLRenderPipelineDescriptor()
+        ambientDescriptor.vertexFunction = library.makeFunction(name: "ambientVertex")
+        ambientDescriptor.fragmentFunction = library.makeFunction(name: "ambientFragment")
+        ambientDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        // Each frame moves the copy a fifth of the way to the canvas, so the
+        // glow drifts rather than flickers.
+        let ease = ambientDescriptor.colorAttachments[0]!
+        ease.isBlendingEnabled = true
+        ease.sourceRGBBlendFactor = .blendColor
+        ease.destinationRGBBlendFactor = .oneMinusBlendColor
+        ease.sourceAlphaBlendFactor = .one
+        ease.destinationAlphaBlendFactor = .zero
+        ambientPipeline = try device.makeRenderPipelineState(descriptor: ambientDescriptor)
+        let ambientTexture = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb, width: Int(ambientSize.x), height: Int(ambientSize.y), mipmapped: false)
+        ambientTexture.usage = [.renderTarget, .shaderRead]
+        ambientTexture.storageMode = .private
+        ambient = device.makeTexture(descriptor: ambientTexture)
         let depthDescriptor = MTLDepthStencilDescriptor()
         depthDescriptor.depthCompareFunction = .less
         depthDescriptor.isDepthWriteEnabled = true
@@ -284,6 +364,9 @@ final class Renderer: @unchecked Sendable {
         onFinished: @escaping @Sendable (_ gpuEnd: Double) -> Void = { _ in }
     ) {
         guard let commandBuffer = queue.makeCommandBuffer() else { return }
+        if let room, room.panels.contains(where: { $0.source == .ambient }) {
+            drawAmbient(from: room, images: images, into: commandBuffer)
+        }
         let pass = MTLRenderPassDescriptor()
         // Drawn with several samples a pixel, so edges come out smooth
         // rather than stepped and crawling as the head moves, then resolved
@@ -328,6 +411,33 @@ final class Renderer: @unchecked Sendable {
         commandBuffer.commit()
     }
 
+    /// Brings the small blurred copy of the canvas a step closer to what the
+    /// canvas shows now.
+    private func drawAmbient(from room: RoomView, images: PanelImages, into commandBuffer: MTLCommandBuffer) {
+        guard let ambient else { return }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = ambient
+        pass.colorAttachments[0].loadAction = ambientStarted ? .load : .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
+        encoder.setRenderPipelineState(ambientPipeline)
+        encoder.setFragmentSamplerState(sampler, index: 0)
+        // The first frame fills it straight away.
+        let step: Float = ambientStarted ? 0.2 : 1
+        encoder.setBlendColor(red: step, green: step, blue: step, alpha: 1)
+        for panel in room.panels {
+            guard let tile = panel.tile, tile < images.canvas.count, let image = images.canvas[tile] else { continue }
+            var span = SIMD4<Float>((panel.rect.left + 1) / 2, (panel.rect.right + 1) / 2, ambientSize.x, ambientSize.y)
+            encoder.setVertexBytes(&span, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+            encoder.setFragmentBytes(&span, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+            encoder.setFragmentTexture(image.texture, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+        encoder.endEncoding()
+        ambientStarted = true
+    }
+
     private func drawPanels(
         of room: RoomView, eye: EyeOptics, viewProjection: simd_float4x4, scanEndViewProjection: simd_float4x4,
         images: PanelImages, sharpen: Bool, softEdges: Bool, encoder: MTLRenderCommandEncoder
@@ -336,7 +446,8 @@ final class Renderer: @unchecked Sendable {
         let lensGrid = SIMD4(
             Float(eye.distortion?.columns ?? 1), Float(eye.distortion?.rows ?? 1), eye.size.x, eye.size.y)
         for panel in room.panels {
-            guard let image = images[panel.source] else { continue }
+            let isAmbient = panel.source == .ambient
+            guard let texture = isAmbient ? ambient : images[panel.source]?.texture else { continue }
             let surface = panel.surface
             let rect = panel.rect
             // How wide and tall the piece looks, roughly, from its distance.
@@ -358,11 +469,12 @@ final class Renderer: @unchecked Sendable {
                     panel.highlighted ? 1 : 0, Float(rows), isCanvas && sharpen ? 1 : 0,
                     !softEdges || panel.source == .pointer ? 0 : isCanvas ? 1 : 2),
                 spin0: SIMD4(spin.columns.0, 0), spin1: SIMD4(spin.columns.1, 0), spin2: SIMD4(spin.columns.2, 0),
-                lens: lens, lensGrid: lensGrid)
-            encoder.setDepthStencilState(panel.source == .pointer ? overDepthState : depthState)
+                lens: lens, lensGrid: lensGrid, halo: panel.halo)
+            encoder.setRenderPipelineState(isAmbient ? haloPipeline : panelPipeline)
+            encoder.setDepthStencilState(panel.source == .pointer || isAmbient ? overDepthState : depthState)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
-            encoder.setFragmentTexture(image.texture, index: 0)
+            encoder.setFragmentTexture(texture, index: 0)
             encoder.drawPrimitives(
                 type: .triangleStrip, vertexStart: 0, vertexCount: 2 * (segments + 1), instanceCount: rows)
         }
@@ -382,6 +494,7 @@ final class Renderer: @unchecked Sendable {
         var spin2: SIMD4<Float>
         var lens: SIMD4<Float>
         var lensGrid: SIMD4<Float>
+        var halo: SIMD4<Float>
     }
 
     /// `distortion`'s offsets as a texture the vertex shader looks up in,

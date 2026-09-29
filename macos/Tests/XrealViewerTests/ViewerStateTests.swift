@@ -246,3 +246,17 @@ private func turnSeen(framesLate late: Double) throws -> Float {
     state.settings.livePointer = false
     #expect(try !drawsPointer(at: CGPoint(x: 2800, y: 1000)))
 }
+
+@Test func ambientLightHangsAllRoundTheCanvasWhenOn() throws {
+    var state = freshState()
+    let off = try #require(state.frame().room)
+    #expect(!off.panels.contains { $0.source == .ambient })
+    state.settings.ambientLight = true
+    let on = try #require(state.frame().room)
+    let glow = on.panels.filter { $0.source == .ambient }
+    // Past every edge of the canvas.
+    #expect(glow.contains { $0.rect.left < -1 } && glow.contains { $0.rect.right > 1 })
+    #expect(glow.contains { $0.rect.top > 1 } && glow.contains { $0.rect.bottom < -1 })
+    // A canvas still starting up has nothing to take colours from.
+    #expect(!(try #require(state.frame(sizes: [nil, nil, nil]).room)).panels.contains { $0.source == .ambient })
+}

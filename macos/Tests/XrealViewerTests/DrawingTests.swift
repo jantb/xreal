@@ -47,7 +47,7 @@ private func whiteImage(_ device: MTLDevice, width: Int, height: Int) throws -> 
 
 /// A frame of a small white flat canvas straight ahead, with the view
 /// reaching past its edges, drawn as the glasses would get it.
-private func drawWhiteCanvas(softEdges: Bool) async throws -> MTLTexture {
+private func drawWhiteCanvas(softEdges: Bool, ambientLight: Bool = false) async throws -> MTLTexture {
     let renderer = try Renderer()
     let layer = CAMetalLayer()
     layer.device = renderer.device
@@ -58,6 +58,7 @@ private func drawWhiteCanvas(softEdges: Bool) async throws -> MTLTexture {
     var settings = XrealCore.Settings()
     settings.canvas = RoomScreen(width: 1920, height: 1080)
     settings.canvas.placement = ScreenPlacement(direction: SIMD3(0, 0, -1), distance: 2)
+    settings.ambientLight = ambientLight
     var state = ViewerState(settings: settings)
     let now = monotonicNow()
     let room = try #require(
@@ -101,4 +102,14 @@ private func row(_ texture: MTLTexture, _ y: Int) -> [UInt8] {
     #expect(dimmed > 0)
     #expect(dimmed < 200)
     #expect(zip(soft, hard).allSatisfy { $0 <= $1 })
+}
+
+@Test func ambientLightGlowsInTheRoomAroundTheCanvasOnlyWhenOn() async throws {
+    let lit = row(try await drawWhiteCanvas(softEdges: true, ambientLight: true), 540)
+    let plain = row(try await drawWhiteCanvas(softEdges: true), 540)
+    // Pixels dark beside the canvas without it, and lit with it.
+    let glowing = stride(from: 0, to: plain.count, by: 4).filter { plain[$0] < 10 && lit[$0] > 40 }.count
+    #expect(glowing > 40)
+    // The canvas itself is left as it is.
+    #expect(lit[960 * 4] == plain[960 * 4])
 }
