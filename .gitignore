@@ -1,6 +1,4 @@
-target
-.idea
 .DS_Store
-/xreal
+.idea
 macos/.build
 macos/build
