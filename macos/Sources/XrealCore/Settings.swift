@@ -181,11 +181,13 @@ public struct Settings: Equatable, Sendable {
         return lines.map { $0 + "\n" }.joined()
     }
 
-    /// `WIDTHxHEIGHT`, `,2x` for a HiDPI screen, `,curved` for a curved one, then
+    /// `WIDTHxHEIGHT`, `,2x` for a HiDPI screen, `,curved` for a curved one,
+    /// `,sphere` for a spherical one, then
     /// `@x,y,z,distance` for where it hangs, and `,tilt` if it is tilted.
     private static func serialize(_ screen: RoomScreen) -> String {
         let size =
             "\(screen.width)x\(screen.height)" + (screen.scale == 2 ? ",2x" : "") + (screen.curved ? ",curved" : "")
+            + (screen.spherical ? ",sphere" : "")
         let placement = screen.placement
         let d = placement.direction
         return size + "@\(d.x),\(d.y),\(d.z),\(placement.distance)"
@@ -202,7 +204,8 @@ public struct Settings: Equatable, Sendable {
         let scale = shape.dropFirst().contains("2x") ? 2 : 1
         guard RoomScreen.isAllowed(width: width, height: height, scale: scale) else { return nil }
         var screen = RoomScreen(
-            width: width, height: height, scale: scale, curved: shape.dropFirst().contains("curved"))
+            width: width, height: height, scale: scale, curved: shape.dropFirst().contains("curved"),
+            spherical: shape.dropFirst().contains("sphere"))
         if parts.count == 2 {
             let numbers = parts[1].split(separator: ",").compactMap { Float($0) }
             // Written before screens could be tilted: without the tilt.

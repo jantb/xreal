@@ -327,3 +327,40 @@ func lookingAtATiltedScreenFindsThePixelThere(curved: Bool) throws {
         }
     }
 }
+
+@Test func aCanvasWrappedAroundTheViewerHasEveryPixelFacingThemFromTheSameDistance() {
+    let wrapped = RoomScreen(width: 5752, height: 2160, spherical: true).surface()
+    for x in [Float(-1), -0.5, 0, 0.7, 1] {
+        for y in [Float(-1), -0.3, 0.4, 1] {
+            let point = wrapped.point(at: SIMD2(x, y))
+            let across = wrapped.point(at: SIMD2(x + 0.001, y)) - wrapped.point(at: SIMD2(x - 0.001, y))
+            let down = wrapped.point(at: SIMD2(x, y + 0.001)) - wrapped.point(at: SIMD2(x, y - 0.001))
+            #expect(abs(simd_length(point) - 1) < 1e-4, "x \(x) y \(y)")
+            // Square to the line of sight both ways.
+            #expect(abs(dot(normalize(across), normalize(point))) < 1e-3, "x \(x) y \(y)")
+            #expect(abs(dot(normalize(down), normalize(point))) < 1e-3, "x \(x) y \(y)")
+        }
+    }
+}
+
+@Test func lookingAtAPixelOfAWrappedCanvasFindsThatPixel() throws {
+    for radius in [Float(0.6), 1, 3] {
+        var screen = RoomScreen(width: 5752, height: 2160, spherical: true)
+        screen.placement = ScreenPlacement(direction: SIMD3(0.3, 0.2, -1), tilt: 0.1)
+        for pixel in [SIMD2<Float>(2876, 1080), SIMD2(100, 200), SIMD2(5600, 2000), SIMD2(4000, 50)] {
+            let point = screen.roomPoint(ofPixel: pixel, curveRadius: radius)
+            let found = try #require(gazeTarget(normalize(point), on: screen, curveRadius: radius))
+            #expect(simd_distance(found, pixel) < 1, "radius \(radius) pixel \(pixel)")
+        }
+        #expect(gazeTarget(-normalize(screen.placement.direction), on: screen, curveRadius: radius) == nil)
+    }
+}
+
+@Test func aTallWrappedCanvasBentTightlyStillStopsShortOfThePoles() {
+    let tall = RoomScreen(width: 7672, height: 4320, spherical: true)
+    let surface = tall.surface(curveRadius: 0.5)
+    let top = surface.point(at: SIMD2(0, 1))
+    let elevation = atan2(top.y, simd_length(SIMD2(top.x, top.z)))
+    #expect(elevation < 1.2)
+    #expect(elevation > 0.5)
+}

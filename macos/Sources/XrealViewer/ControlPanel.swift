@@ -244,6 +244,14 @@ private struct CanvasSection: View {
             )
             .font(.caption).foregroundStyle(.secondary)
             Toggle("Curved", isOn: model.toggle(\.settings.canvas.curved, .toggleCurved))
+                .disabled(settings.canvas.spherical)
+            VStack(alignment: .leading) {
+                Toggle("Wrap Around You", isOn: model.toggle(\.settings.canvas.spherical, .toggleSpherical))
+                Text(
+                    "Curves the canvas up and down as well, like the inside of a ball centred on you, so every pixel faces you."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
             VStack(alignment: .leading) {
                 LabeledContent("Curve") {
                     Text(String(format: "Radius %.2f × distance", settings.curveRadius)).monospacedDigit()
@@ -256,7 +264,7 @@ private struct CanvasSection: View {
                 Text("At 1 the canvas surrounds you evenly; further right bends it more.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            .disabled(!settings.canvas.curved)
+            .disabled(!settings.canvas.curved && !settings.canvas.spherical)
             VStack(alignment: .leading) {
                 LabeledContent("Viewing Distance") {
                     Text(String(format: "%.2f m", settings.metresPerRoomUnit)).monospacedDigit()

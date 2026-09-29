@@ -16,6 +16,9 @@ private let gazeSlack: Float = 0.35  // rad
 // A curved screen wraps at most this far either side of its middle; one
 // brought closer than that allows keeps this curve and stops coming closer.
 private let maxHalfArc: Float = 2.9  // rad, about 166°
+// A spherical screen reaches at most this far above and below its middle,
+// leaving room above it for the row that hangs there, short of the pole.
+private let maxHalfRise: Float = 1  // rad, about 57°
 // Screens wider than this are captured in tiles about one view wide, so
 // the parts out of view can update less often.
 private let maxUntiledWidth = 3840
@@ -122,16 +125,27 @@ public struct ScreenSurface: Equatable, Sendable {
     /// Turns the whole surface as described above about the viewer, to tilt
     /// it; `center`, `right` and `up` describe it before the turn.
     public var spin: simd_quatf
+    /// How far every column leans towards the viewer for each unit it rises
+    /// from the bottom edge, which stays where it is: 0 upright. A curved
+    /// screen leaning so narrows towards its top like a lampshade, facing
+    /// the viewer all the way round.
+    public var lean: Float
+    /// A curved screen whose columns curve too, round the same middle as its
+    /// rows: part of a sphere, so every pixel faces the viewer when that
+    /// middle is at the eyes. `up` is then measured along the curve.
+    public var spherical: Bool
 
     public init(
         center: SIMD3<Float>, right: SIMD3<Float>, up: SIMD3<Float>, halfArc: Float = 0,
-        spin: simd_quatf = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+        spin: simd_quatf = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1), lean: Float = 0, spherical: Bool = false
     ) {
         self.center = center
         self.right = right
         self.up = up
         self.halfArc = halfArc
         self.spin = spin
+        self.lean = lean
+        self.spherical = spherical
     }
 
     /// The radius of each row's arc, for a curved screen.
@@ -150,8 +164,26 @@ public struct ScreenSurface: Equatable, Sendable {
     }
 
     private func uprightPoint(at position: SIMD2<Float>) -> SIMD3<Float> {
-        guard halfArc > 0 else { return center + position.x * right + position.y * up }
-        return center + rowOffset(position.x * halfArc) + position.y * up
+        guard halfArc > 0 else {
+            let tilted = lean == 0 ? .zero : lean * (position.y + 1) * length(up) * horizontalAhead
+            return center + position.x * right + position.y * up - tilted
+        }
+        let across = position.x * halfArc
+        if spherical {
+            let rise = position.y * length(up) / rowRadius
+            let level = sin(across) * normalize(right) + cos(across) * horizontalAhead
+            return sphereMiddle + rowRadius * (cos(rise) * level + sin(rise) * normalize(up))
+        }
+        // How far towards the viewer the row at this height has come.
+        let inward = lean * (position.y + 1) * length(up)
+        let radius = rowRadius - inward
+        return center + position.y * up - rowRadius * horizontalAhead
+            + radius * (sin(across) * normalize(right) + cos(across) * horizontalAhead)
+    }
+
+    /// Where the rows' arcs, and a spherical screen's columns, are centred.
+    private var sphereMiddle: SIMD3<Float> {
+        center - rowRadius * horizontalAhead
     }
 
     /// Level unit vector towards the middle of the screen.
@@ -164,7 +196,27 @@ public struct ScreenSurface: Equatable, Sendable {
     /// radians (0 on the screen); nil when the gaze misses its surface.
     func hit(gaze: SIMD3<Float>) -> (along: Float, at: SIMD2<Float>, miss: Float)? {
         let upright = spin.inverse.act(gaze)
-        return halfArc > 0 ? curvedHit(gaze: upright) : flatHit(gaze: upright)
+        guard halfArc > 0 else { return flatHit(gaze: upright) }
+        return spherical ? sphericalHit(gaze: upright) : curvedHit(gaze: upright)
+    }
+
+    /// `hit(gaze:)` for a spherical screen: where the gaze leaves the
+    /// sphere, on the far side from wherever its middle is.
+    private func sphericalHit(gaze: SIMD3<Float>) -> (along: Float, at: SIMD2<Float>, miss: Float)? {
+        let middle = sphereMiddle
+        let towards = dot(gaze, middle)
+        let discriminant = towards * towards - dot(middle, middle) + rowRadius * rowRadius
+        guard discriminant >= 0 else { return nil }
+        let along = towards + discriminant.squareRoot()
+        guard along > 1e-4 else { return nil }
+        let unit = (gaze * along - middle) / rowRadius
+        let rise = asin(min(max(dot(unit, normalize(up)), -1), 1))
+        let across = atan2(dot(unit, normalize(right)), dot(unit, horizontalAhead))
+        let halfRise = length(up) / rowRadius
+        // Past the edge by an angle round the sphere's middle; seen from the
+        // eyes, that many radii along the sphere over the distance to it.
+        let past = max(abs(across) - halfArc, abs(rise) - halfRise, 0)
+        return (along, SIMD2(across / halfArc, -rise / halfRise), past * rowRadius / along)
     }
 
     /// `hit(gaze:)` for a curved screen. Each angle round the row fixes how
@@ -247,15 +299,21 @@ public struct RoomScreen: Equatable, Sendable {
     public var placement: ScreenPlacement
     /// Bent around the viewer, so every part of a row is equally far away.
     public var curved: Bool
+    /// Bent both ways, as part of a sphere round the viewer, so every pixel
+    /// is equally far away and faces them. Curved whether or not `curved`
+    /// is set.
+    public var spherical: Bool
 
     public init(
-        width: Int, height: Int, scale: Int = 1, placement: ScreenPlacement = .straightAhead, curved: Bool = false
+        width: Int, height: Int, scale: Int = 1, placement: ScreenPlacement = .straightAhead, curved: Bool = false,
+        spherical: Bool = false
     ) {
         self.width = width
         self.height = height
         self.scale = scale
         self.placement = placement
         self.curved = curved
+        self.spherical = spherical
     }
 
     /// Whether a virtual screen of this size can be made without upsetting
@@ -279,15 +337,18 @@ public struct RoomScreen: Equatable, Sendable {
     /// evenly, less bends it more, more bends it less.
     public func surface(curveRadius: Float = 1) -> ScreenSurface {
         let (center, right, up) = placement.frame(width: width, height: height)
-        guard curved else { return ScreenSurface(center: center, right: right, up: up, spin: placement.spin) }
+        guard curved || spherical else {
+            return ScreenSurface(center: center, right: right, up: up, spin: placement.spin)
+        }
         // Made straight ahead and level, where it bends evenly round the
         // viewer, then turned as a whole to where it hangs: raised, lowered
         // or tilted, it looks the same as straight ahead when faced.
         let (halfWidth, halfHeight) = (length(right), length(up))
-        let rowRadius = max(placement.distance * curveRadius, halfWidth / maxHalfArc)
+        let rowRadius = max(
+            placement.distance * curveRadius, halfWidth / maxHalfArc, spherical ? halfHeight / maxHalfRise : 0)
         return ScreenSurface(
             center: SIMD3(0, 0, -placement.distance), right: SIMD3(halfWidth, 0, 0), up: SIMD3(0, halfHeight, 0),
-            halfArc: halfWidth / rowRadius, spin: placement.orientation)
+            halfArc: halfWidth / rowRadius, spin: placement.orientation, spherical: spherical)
     }
 }
 

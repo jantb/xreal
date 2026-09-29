@@ -2,7 +2,7 @@ import Foundation
 import simd
 
 // Points between the canvas's top edge and what hangs above it.
-private let overheadGap: Float = 48
+private let overheadGap: Float = 72
 // Points between the dashboard and the pinned window.
 private let overheadSpacing: Float = 32
 
@@ -75,20 +75,53 @@ public func overheadLayout(canvas: RoomScreen, dashboard: SIMD2<Float>?, pinned:
 }
 
 /// The surface of the row `height` points tall above the canvas: as wide as
-/// the canvas and curved like it, just above its top edge, and tilted to
-/// face the viewer, like a monitor hung overhead and angled down.
+/// the canvas and curved like it, starting just above its top edge and
+/// leaning towards the viewer as it rises, so it faces the eyes like a
+/// monitor hung overhead and angled down. Curved, it leans the same way all
+/// the way round, so its bottom edge follows the canvas's top edge.
 public func overheadSurface(canvas: RoomScreen, curveRadius: Float = 1, height: Float) -> ScreenSurface {
     let canvasSurface = canvas.surface(curveRadius: curveRadius)
     let distance = canvas.placement.distance
-    let halfCanvas = Float(canvas.height) * roomUnitsPerPixel / 2
+    let bottom = Float(canvas.height) * roomUnitsPerPixel / 2 + overheadGap * roomUnitsPerPixel
     let halfRow = max(height, 1) * roomUnitsPerPixel / 2
-    // Turned up from the canvas's middle until its bottom edge is just
-    // above the canvas's top edge.
-    let raise = atan((halfCanvas + overheadGap * roomUnitsPerPixel) / distance) + atan(halfRow / distance)
+    // Square to the line of sight at the row's middle.
+    let lean = (bottom + halfRow) / distance
+    // Shortened upright so the leaning row keeps its height along its slope.
+    let halfUp = halfRow / (1 + lean * lean).squareRoot()
     return ScreenSurface(
-        center: SIMD3(0, 0, -distance), right: SIMD3(Float(canvas.width) * roomUnitsPerPixel / 2, 0, 0),
-        up: SIMD3(0, halfRow, 0), halfArc: canvasSurface.halfArc,
-        spin: canvas.placement.orientation * simd_quatf(angle: raise, axis: SIMD3(1, 0, 0)))
+        center: SIMD3(0, bottom + halfUp, -distance), right: SIMD3(Float(canvas.width) * roomUnitsPerPixel / 2, 0, 0),
+        up: SIMD3(0, halfUp, 0), halfArc: canvasSurface.halfArc, spin: canvas.placement.orientation, lean: lean)
+}
+
+/// The surface the row above the canvas hangs on and where the dashboard
+/// and the pinned window are on it. A spherical canvas faces the viewer
+/// everywhere already, so the row simply carries on up the same sphere;
+/// any other gets `overheadSurface`.
+public func overheadPanels(canvas: RoomScreen, curveRadius: Float = 1, layout: OverheadLayout)
+    -> (surface: ScreenSurface, dashboard: SurfaceRect?, pinned: SurfaceRect?)
+{
+    let surface = canvas.surface(curveRadius: curveRadius)
+    // How far round the sphere the row would reach above its middle.
+    let perPoint = 2 / Float(max(canvas.height, 1))
+    let bottom = 1 + overheadGap * perPoint
+    let reach = (bottom + layout.height * perPoint) * length(surface.up) / (length(surface.right) / max(surface.halfArc, 1e-6))
+    // Up to near the pole, where it would fold over; a taller row hangs
+    // tilted instead.
+    guard canvas.spherical, reach < 1.45 else {
+        return (
+            overheadSurface(canvas: canvas, curveRadius: curveRadius, height: layout.height), layout.dashboard,
+            layout.pinned
+        )
+    }
+    // From the row's positions to the canvas's, above its top edge.
+    func lifted(_ rect: SurfaceRect?) -> SurfaceRect? {
+        rect.map {
+            SurfaceRect(
+                left: $0.left, right: $0.right, top: bottom + ($0.top + 1) / 2 * layout.height * perPoint,
+                bottom: bottom + ($0.bottom + 1) / 2 * layout.height * perPoint)
+        }
+    }
+    return (surface, lifted(layout.dashboard), lifted(layout.pinned))
 }
 
 /// Where a pointer image `size` points large, with its hot spot `hotSpot`

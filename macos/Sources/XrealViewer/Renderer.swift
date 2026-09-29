@@ -15,7 +15,7 @@ private let shaderSource = """
         float4x4 scanEndViewProjection;  // as seen when the bottom row lights up
         float4 center, right, up;  // room coordinates; half extents
         float4 shape;              // x: half arc (0 flat), yz: left and right, w: segments
-        float4 rect;               // x: top, y: bottom
+        float4 rect;               // x: top, y: bottom, z: lean towards the viewer, w: 1 spherical
         float4 outline;            // x: 1 to outline the canvas; y: rows it is drawn in; z: 1 to sharpen
         float4 spin0, spin1, spin2;  // turns the upright screen to its tilt
         float4 lens;               // xy: where the lens lookup starts, z: its step, w: 1 to use it
@@ -40,15 +40,27 @@ private let shaderSource = """
         float x = mix(panel.shape.y, panel.shape.z, t);
         float y = mix(panel.rect.x, panel.rect.y, v);
         float3 room;
-        if (panel.shape.x > 0) {
-            // Curved: the row's arc plus the straight column.
-            float rowRadius = length(panel.right.xyz) / panel.shape.x;
-            float3 ahead = normalize(float3(panel.center.x, 0, panel.center.z));
+        float3 ahead = normalize(float3(panel.center.x, 0, panel.center.z));
+        // How far towards the viewer the row at this height has come.
+        float inward = panel.rect.z * (y + 1) * length(panel.up.xyz);
+        if (panel.shape.x > 0 && panel.rect.w > 0.5) {
+            // Spherical: the row's arc and the column's arc round one middle.
+            float radius = length(panel.right.xyz) / panel.shape.x;
             float across = x * panel.shape.x;
-            room = panel.center.xyz + rowRadius * (sin(across) * normalize(panel.right.xyz) - (1 - cos(across)) * ahead)
-                + y * panel.up.xyz;
+            float rise = y * length(panel.up.xyz) / radius;
+            float3 level = sin(across) * normalize(panel.right.xyz) + cos(across) * ahead;
+            room = panel.center.xyz - radius * ahead + radius * (cos(rise) * level + sin(rise) * normalize(panel.up.xyz));
+        } else if (panel.shape.x > 0) {
+            // Curved: the row's arc, narrowed by the lean, plus the column.
+            float rowRadius = length(panel.right.xyz) / panel.shape.x;
+            float across = x * panel.shape.x;
+            room = panel.center.xyz + y * panel.up.xyz - rowRadius * ahead
+                + (rowRadius - inward) * (sin(across) * normalize(panel.right.xyz) + cos(across) * ahead);
         } else {
             room = panel.center.xyz + x * panel.right.xyz + y * panel.up.xyz;
+            if (panel.rect.z != 0) {
+                room -= inward * ahead;
+            }
         }
         room = float3x3(panel.spin0.xyz, panel.spin1.xyz, panel.spin2.xyz) * room;
         PanelOut out;
@@ -319,7 +331,7 @@ final class Renderer: @unchecked Sendable {
                 viewProjection: viewProjection, scanEndViewProjection: scanEndViewProjection,
                 center: SIMD4(surface.center, 1), right: SIMD4(surface.right, 0), up: SIMD4(surface.up, 0),
                 shape: SIMD4(surface.halfArc, rect.left, rect.right, Float(segments)),
-                rect: SIMD4(rect.top, rect.bottom, 0, 0),
+                rect: SIMD4(rect.top, rect.bottom, surface.lean, surface.spherical ? 1 : 0),
                 outline: SIMD4(panel.highlighted ? 1 : 0, Float(rows), isCanvas && sharpen ? 1 : 0, 0),
                 spin0: SIMD4(spin.columns.0, 0), spin1: SIMD4(spin.columns.1, 0), spin2: SIMD4(spin.columns.2, 0),
                 lens: lens, lensGrid: lensGrid)

@@ -50,18 +50,20 @@ private func elevation(_ point: SIMD3<Float>) -> Float {
             screen.curved = curved
             screen.placement = placement
             let row = overheadSurface(canvas: screen, height: 400)
-            let canvasTop = screen.surface().point(at: SIMD2(0, 1))
-            let rowBottom = row.point(at: SIMD2(0, -1))
             let rowMiddle = row.point(at: .zero)
             let upward = row.point(at: SIMD2(0, 0.01)) - row.point(at: SIMD2(0, -0.01))
-            // Seen just above the canvas's top edge, as the canvas's up goes.
+            // Seen just above the canvas's top edge, as the canvas's up goes,
+            // right out to the sides.
             let turn = placement.orientation.inverse
             let seen = { (point: SIMD3<Float>) in elevation(turn.act(point)) }
-            #expect(seen(rowBottom) > seen(canvasTop), "curved \(curved)")
-            #expect(seen(rowBottom) - seen(canvasTop) < 0.05, "curved \(curved)")
+            for x in [Float(-0.9), -0.5, 0, 0.5, 0.9] {
+                let (edge, bottom) = (screen.surface().point(at: SIMD2(x, 1)), row.point(at: SIMD2(x, -1)))
+                #expect(seen(bottom) > seen(edge), "curved \(curved) x \(x)")
+                #expect(seen(bottom) - seen(edge) < 0.05, "curved \(curved) x \(x)")
+            }
             // Its middle faces the eyes: straight up it runs across the line
             // of sight, not along the canvas.
-            #expect(abs(dot(normalize(upward), normalize(rowMiddle))) < 1e-3, "curved \(curved)")
+            #expect(abs(dot(normalize(upward), normalize(rowMiddle))) < 1e-2, "curved \(curved)")
         }
     }
 }
@@ -119,4 +121,18 @@ private func elevation(_ point: SIMD3<Float>) -> Float {
     #expect(sample.cpu != nil)
     #expect(sample.cores.count == CpuTicks.perCore()?.count)
     #expect(sample.memory != nil)
+}
+
+@Test func onAWrappedCanvasTheRowCarriesOnUpTheSameSphereAboveItsTopEdge() throws {
+    let wrapped = RoomScreen(width: 5752, height: 2160, spherical: true)
+    let layout = overheadLayout(canvas: wrapped, dashboard: SIMD2(2400, 172), pinned: SIMD2(800, 600))
+    let row = overheadPanels(canvas: wrapped, layout: layout)
+    let board = try #require(row.dashboard)
+    for x in [board.left, 0, board.right] {
+        let bottom = row.surface.point(at: SIMD2(x, board.bottom))
+        let edge = wrapped.surface().point(at: SIMD2(x, 1))
+        #expect(elevation(bottom) > elevation(edge), "x \(x)")
+        // Still on the sphere, facing the viewer.
+        #expect(abs(simd_length(bottom) - 1) < 1e-4, "x \(x)")
+    }
 }

@@ -113,6 +113,7 @@ enum ViewerCommand {
     case setDepthScale(Float)
     case calibrate
     case toggleCurved
+    case toggleSpherical
     /// Picks up (true) or lets go of (false) the canvas, if looked at.
     case grab(Bool)
     /// Brings the canvas closer (true) or pushes it away (false).
@@ -363,12 +364,12 @@ struct ViewerState: Sendable {
         let overhead = overheadLayout(
             canvas: canvas, dashboard: settings.statusStrip ? extras.status : nil, pinned: extras.pinned)
         if overhead.height > 0 {
-            let row = overheadSurface(canvas: canvas, curveRadius: curveRadius, height: overhead.height)
-            if let rect = overhead.dashboard {
-                room.panels.append(RoomView.Panel(source: .status, surface: row, rect: rect))
+            let row = overheadPanels(canvas: canvas, curveRadius: curveRadius, layout: overhead)
+            if let rect = row.dashboard {
+                room.panels.append(RoomView.Panel(source: .status, surface: row.surface, rect: rect))
             }
-            if let rect = overhead.pinned {
-                room.panels.append(RoomView.Panel(source: .pinned, surface: row, rect: rect))
+            if let rect = row.pinned {
+                room.panels.append(RoomView.Panel(source: .pinned, surface: row.surface, rect: rect))
             }
         }
         let surface = canvas.surface(curveRadius: curveRadius)
@@ -682,6 +683,7 @@ final class FrameLoop: @unchecked Sendable {
                 tracking.calibrate()
                 persist = false
             case .toggleCurved: state.settings.canvas.curved.toggle()
+            case .toggleSpherical: state.settings.canvas.spherical.toggle()
             case .grab(let pickUp):
                 // Saved once it is let go.
                 persist = pickUp ? false : state.endGrab()
