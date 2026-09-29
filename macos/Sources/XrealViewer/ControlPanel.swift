@@ -218,16 +218,17 @@ private struct CanvasSection: View {
                 }
             }
             Toggle("Curved", isOn: model.toggle(\.settings.canvas.curved, .toggleCurved))
-            Picker(
-                "Curve",
-                selection: Binding(get: { settings.curveRadius }, set: { model.perform(.setCurveRadius($0)) })
-            ) {
-                ForEach(curveRadii, id: \.radius) { curve in
-                    Text(curve.title).tag(curve.radius)
+            VStack(alignment: .leading) {
+                LabeledContent("Curve") {
+                    Text(String(format: "Radius %.2f × distance", settings.curveRadius)).monospacedDigit()
                 }
-                if !curveRadii.contains(where: { $0.radius == settings.curveRadius }) {
-                    Text(String(format: "Custom (%.2f)", settings.curveRadius)).tag(settings.curveRadius)
-                }
+                // Stronger to the right, which is a smaller radius.
+                Slider(
+                    value: Binding(
+                        get: { -log(settings.curveRadius) }, set: { model.perform(.setCurveRadius(exp(-$0))) }),
+                    in: -log(maxCurveRadius)...(-log(minCurveRadius)))
+                Text("At 1 the canvas surrounds you evenly; further right bends it more.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             .disabled(!settings.canvas.curved)
             VStack(alignment: .leading) {
@@ -239,18 +240,10 @@ private struct CanvasSection: View {
                         get: { log(settings.metresPerRoomUnit) },
                         set: { model.perform(.setDepthScale(exp($0))) }),
                     in: log(minViewingDistance)...log(maxViewingDistance))
-                Picker(
-                    "3D Depth",
-                    selection: Binding<Float?>(
-                        get: { settings.metresPerRoomUnit }, set: { $0.map { model.perform(.setDepthScale($0)) } })
-                ) {
-                    ForEach(depthScales, id: \.metres) { scale in
-                        Text(scale.title).tag(Float?.some(scale.metres))
-                    }
-                }
-                .pickerStyle(.segmented)
-                Text("Nearer shows more depth between the eyes' views; the canvas keeps its size.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text(
+                    "Nearer shows more depth between the eyes' views; the canvas keeps its size. About 4 m is where the glasses' optics focus, easiest on the eyes."
+                )
+                .font(.caption).foregroundStyle(.secondary)
             }
             Button("Put Canvas Back Straight Ahead") { model.perform(.resetView) }
         }

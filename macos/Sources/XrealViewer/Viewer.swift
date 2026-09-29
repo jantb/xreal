@@ -36,19 +36,15 @@ let glassesRefreshRate = 90.0
 private let levelSnapTilt: Float = 2 * .pi / 180  // rad
 // Each step of bringing the canvas closer or pushing it away.
 private let distanceStep: Float = 1.1
-/// How far away the canvas at distance 1 is, with the menu titles. About
-/// 4 m is where the glasses' optics focus, easiest on the eyes; nearer shows
-/// more depth.
-let depthScales: [(metres: Float, title: String)] = [(4, "Subtle"), (2, "Normal"), (1, "Strong")]
-/// The range of the viewing distance slider, in metres.
+/// The range of the viewing distance slider, in metres: how far away the
+/// canvas at distance 1 is.
 let minViewingDistance: Float = 0.5
 let maxViewingDistance: Float = 20
 
-/// Curve radii to choose from for the curved canvas, as multiples of its
-/// distance, with their menu titles.
-let curveRadii: [(radius: Float, title: String)] = [
-    (0.5, "Stronger"), (0.75, "Strong"), (1, "Around You"), (1.5, "Gentle"), (2.5, "Gentler"), (5, "Nearly Flat"),
-]
+/// The range of the curve slider, as multiples of the canvas's distance: the
+/// smaller the radius, the stronger the curve.
+let minCurveRadius: Float = 0.5
+let maxCurveRadius: Float = 5
 // How long the canvas stays outlined after it was moved closer or away.
 private let outlineTime = 1.0
 // macOS nudges displays apart after an arrangement is applied; they are

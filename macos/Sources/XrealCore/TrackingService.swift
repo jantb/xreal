@@ -34,7 +34,14 @@ public final class Tracking: Sendable {
     ) {
         shared = Mutex(TrackingSnapshot(gyroBias: initialBias, biasSlope: biasSlope))
         self.displayMode = Mutex(displayMode)
-        let thread = Thread { [self] in run(initialBias: initialBias, biasSlope: biasSlope) }
+        let thread = Thread { [self] in
+            // Samples arrive about every millisecond and each takes a few
+            // microseconds; a late one is a late pose.
+            if !promoteCurrentThreadToRealTime(period: 0.001, computation: 0.0003, constraint: 0.0007) {
+                eprint("Could not give the tracking thread real-time priority")
+            }
+            run(initialBias: initialBias, biasSlope: biasSlope)
+        }
         thread.name = "Glasses tracking"
         thread.qualityOfService = .userInteractive
         thread.start()

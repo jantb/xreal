@@ -1,5 +1,6 @@
 import Foundation
 import QuartzCore
+import XrealCore
 
 /// Runs a CAMetalDisplayLink on a dedicated high-priority thread and calls
 /// `onFrame` there once per refresh, with the drawable to fill and the time
@@ -15,6 +16,13 @@ final class DisplayLinkThread: NSObject, CAMetalDisplayLinkDelegate, @unchecked 
         self.onFrame = onFrame
         super.init()
         thread = Thread {
+            // A frame is due every refresh; the CPU side of one takes a
+            // couple of milliseconds. Real time keeps busy apps from making
+            // it late.
+            let period = 1 / glassesRefreshRate
+            if !promoteCurrentThreadToRealTime(period: period, computation: 0.003, constraint: min(0.008, period)) {
+                eprint("Could not give the render thread real-time priority")
+            }
             // A run loop without sources returns at once; the port keeps it
             // waiting for the display link and `attach` calls.
             RunLoop.current.add(NSMachPort(), forMode: .default)
