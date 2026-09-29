@@ -297,7 +297,8 @@ private let historyLength = 300
 // Readings that change quickly are smoothed over about this long, so the
 // numbers can be read while they update many times a second.
 private let smoothingTime: Double = 0.4  // seconds
-// Readings that change slowly, or cost more to take, are taken this often.
+// Readings that change slowly, or cost more to take, such as ones that ask
+// a driver, are taken this often.
 private let slowInterval: Double = 1  // seconds
 
 /// Looks at the Mac, as often as asked, and keeps what it saw for the
@@ -338,13 +339,6 @@ public struct SystemMonitor: Sendable {
                     smooth(sample.diskTraffic?.read, rate.read), smooth(sample.diskTraffic?.write, rate.write)
                 )
             }
-            if let gpu = gpuUtilization() {
-                sample.gpu = smooth(sample.gpu, gpu)
-            }
-            if let power = PowerUse.now() {
-                sample.power = PowerUse(
-                    system: smooth(sample.power?.system, power.system), usbOut: smooth(sample.power?.usbOut, power.usbOut))
-            }
         }
         sample.memory = MemoryUse.now()
         previous = (now, cores, network, disk)
@@ -358,6 +352,12 @@ public struct SystemMonitor: Sendable {
             sample.battery = Battery.now()
             sample.disk = DiskSpace.now()
             sample.thermal = ThermalLevel.now()
+            // Asking the GPU's driver and the power controller costs more
+            // than it seems: the driver's statistics briefly hold up GPU
+            // work, which read ten times a second made the glasses drop
+            // frames.
+            sample.gpu = gpuUtilization()
+            sample.power = PowerUse.now()
         }
 
         if let cpu = sample.cpu { sample.cpuHistory.append(cpu) }

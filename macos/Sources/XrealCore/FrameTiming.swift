@@ -41,7 +41,7 @@ public struct FrameTiming: Sendable {
             trimLate(now: promised)
             return
         }
-        if presented > promised + period / 2 {
+        if isLate(promised: promised, presented: presented, period: period) {
             lateAt.append(presented)
         }
         trimLate(now: presented)
@@ -56,6 +56,12 @@ public struct FrameTiming: Sendable {
         Self.append(max(seconds, 0), to: &work)
         let typical = work.count >= minTimedFrames ? Self.percentile(work, 0.95) : 0
         workBudget = min(max(typical + workMargin, minWorkBudget), period * 0.7)
+    }
+
+    /// Whether a frame shown at `presented` came later than frames lately
+    /// have, by more than half a refresh: a hitch, not how the display runs.
+    public func isLate(promised: Double, presented: Double, period: Double) -> Bool {
+        presented - promised > (extraDelay ?? 0) + period / 2
     }
 
     /// Frames that were late or never shown, per second, lately.

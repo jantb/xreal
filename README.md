@@ -68,11 +68,23 @@ even on the glasses' own display behind the view.
 
 The viewer measures when each frame really reaches the glasses and predicts
 the head pose for that moment; the latency and late frames per second are in
-**Controls… > Diagnostics** and on the status line. It also waits to read the
-pose until just before each frame's deadline (**Take Head Pose Late**). Two
-switches are there to compare by those numbers: a 60 Hz canvas, which leaves
-the GPU more room, and the experimental **Full-Screen Glasses Window**, which
-may let macOS skip compositing (it needs "Displays have separate Spaces").
+**Controls… > Diagnostics** and on the dashboard. It also waits to read the
+pose until just before each frame's deadline (**Take Head Pose Late**), which
+measurably drops fewer frames. Hitches are logged: late and dropped frames,
+gaps in the IMU samples, slow dashboard updates and capture rate changes:
+
+```sh
+/usr/bin/log stream --predicate 'subsystem == "dev.jantb.xreal.viewer" AND category == "timing"'
+```
+
+On an M4 Pro with macOS 27 the glasses drop about two frames a second in bursts
+that repeat every 5.055 s (455 of their refreshes). It comes with the canvas's
+virtual display: with none there are no drops, with it uncaptured about half,
+and neither the canvas's size, rate or place nor the viewer's own settings
+and thread priorities change the period. Environment switches, for measuring:
+`XREAL_NO_CANVAS=1` (glasses only), `XREAL_NO_CAPTURE=1` (canvas, not
+captured), `XREAL_NO_REALTIME=1`, `XREAL_FRAME_LATENCY=2` (a frame more slack),
+as in `open --env XREAL_NO_CANVAS=1 "/Applications/XREAL Viewer.app"`.
 
 ## Layout
 

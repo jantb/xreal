@@ -74,9 +74,6 @@ public struct Settings: Equatable, Sendable {
     /// Takes the head pose as late before each frame as the frame's work
     /// allows, so it has less far to predict.
     public var latePoseSampling = true
-    /// Shows the glasses' view as a full-screen window in a space of its
-    /// own, which macOS may send to the glasses without compositing.
-    public var fullScreenWindow = false
     /// Sharpens the canvas where it shows about one pixel per glasses pixel.
     public var sharpFiltering = true
     /// Draws the mouse pointer where the mouse is as each frame is drawn,
@@ -148,7 +145,6 @@ public struct Settings: Equatable, Sendable {
                     settings.canvasRefreshRate = rate
                 }
             case "late_pose_sampling": parse(value, into: &settings.latePoseSampling)
-            case "full_screen_window": parse(value, into: &settings.fullScreenWindow)
             case "sharp_filtering": parse(value, into: &settings.sharpFiltering)
             case "soft_edges": parse(value, into: &settings.softEdges)
             case "even_text_size":
@@ -207,7 +203,6 @@ public struct Settings: Equatable, Sendable {
             "metres_per_room_unit=\(metresPerRoomUnit)",
             "canvas_refresh_rate=\(canvasRefreshRate)",
             "late_pose_sampling=\(latePoseSampling)",
-            "full_screen_window=\(fullScreenWindow)",
             "sharp_filtering=\(sharpFiltering)",
             "soft_edges=\(softEdges)",
             "live_pointer=\(livePointer)",

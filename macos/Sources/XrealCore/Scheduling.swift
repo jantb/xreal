@@ -1,4 +1,5 @@
 import Darwin
+import Foundation
 
 /// Asks the kernel to schedule the calling thread as real time, the class
 /// audio and video threads use: it is woken within a bounded time however
@@ -8,6 +9,10 @@ import Darwin
 /// Quality of service alone still queues the thread behind other work.
 @discardableResult
 public func promoteCurrentThreadToRealTime(period: Double, computation: Double, constraint: Double) -> Bool {
+    // For measuring how the viewer runs without it.
+    if ProcessInfo.processInfo.environment["XREAL_NO_REALTIME"] != nil {
+        return false
+    }
     var timebase = mach_timebase_info_data_t()
     mach_timebase_info(&timebase)
     func ticks(_ seconds: Double) -> UInt32 {

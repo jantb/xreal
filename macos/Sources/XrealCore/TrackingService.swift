@@ -8,6 +8,14 @@ private let biasLogInterval = 30.0  // seconds
 
 private let readErrorsBeforeReconnect = 4
 
+/// Hitches in timing: late frames, IMU gaps, and the periodic work that
+/// could cause them, to find what a stutter lines up with. Read with
+/// `log stream --predicate 'subsystem == "dev.jantb.xreal.viewer" AND category == "timing"'`.
+public let timingLog = Logger(subsystem: "dev.jantb.xreal.viewer", category: "timing")
+// A longer wait between IMU samples, which arrive about every millisecond,
+// is logged.
+private let imuGapToLog = 0.01  // seconds
+
 /// Reads the glasses on a dedicated high-priority thread and publishes the
 /// latest head pose. Reconnects on its own when the glasses are unplugged.
 public final class Tracking: Sendable {
@@ -136,6 +144,7 @@ public final class Tracking: Sendable {
         var rate = SampleRate(now: monotonicNow())
         var readErrors = 0
         var loggedAt = -Double.infinity
+        var lastSampleAt: Double?
 
         while true {
             for command in commands.withLock({ pending in defer { pending = [] }; return pending }) {
@@ -178,6 +187,10 @@ public final class Tracking: Sendable {
                     temperature: sample.temperature, bias: &bias)
             else { continue }
             let now = monotonicNow()
+            if let lastSampleAt, now - lastSampleAt > imuGapToLog {
+                timingLog.notice("IMU gap \(String(format: "%.1f", (now - lastSampleAt) * 1000), privacy: .public) ms")
+            }
+            lastSampleAt = now
             let sampleRateHz = rate.tick(now: now)
             let bias = bias
             shared.withLock { snapshot in

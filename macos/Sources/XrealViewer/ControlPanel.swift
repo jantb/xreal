@@ -342,16 +342,6 @@ private struct ViewSection: View {
             Toggle("Sharpen Text", isOn: model.toggle(\.settings.sharpFiltering, .toggleSharpFiltering))
             Toggle("Soft Edges", isOn: model.toggle(\.settings.softEdges, .toggleSoftEdges))
             Toggle("Correct Lens Distortion", isOn: model.toggle(\.settings.lensCorrection, .toggleLensCorrection))
-            VStack(alignment: .leading) {
-                Toggle(
-                    "Full-Screen Glasses Window", isOn: model.toggle(\.settings.fullScreenWindow, .toggleFullScreenWindow))
-                Text(
-                    NSScreen.screensHaveSeparateSpaces
-                        ? "Experimental: may let macOS skip compositing and show frames sooner. Watch the latency in Diagnostics."
-                        : "Needs “Displays have separate Spaces” in Desktop & Dock settings."
-                )
-                .font(.caption).foregroundStyle(.secondary)
-            }
         }
     }
 }

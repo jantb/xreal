@@ -129,7 +129,6 @@ enum ViewerCommand {
     case setCanvasSize(width: Int, height: Int, scale: Int)
     case setCanvasRefreshRate(Int)
     case toggleLatePoseSampling
-    case toggleFullScreenWindow
     case toggleSharpFiltering
     case toggleLivePointer
     case toggleStatusStrip
@@ -453,7 +452,12 @@ final class FrameLoop: @unchecked Sendable {
         // The later the pose is taken, the less there is to predict: wait
         // until just enough time is left for the frame's work.
         if shared.mutex.withLock({ $0.settings.latePoseSampling }) {
-            sleep(until: deadline - timing.mutex.withLock { $0.workBudget })
+            let wake = deadline - timing.mutex.withLock { $0.workBudget }
+            sleep(until: wake)
+            let overslept = monotonicNow() - wake
+            if overslept > 0.002 {
+                timingLog.notice("Render thread woke \(String(format: "%.1f", overslept * 1000), privacy: .public) ms late")
+            }
         }
         let now = monotonicNow()
         let dt = Float(min(max(now - lastRenderAt, 0), 0.1))
@@ -516,12 +520,22 @@ final class FrameLoop: @unchecked Sendable {
         drawable.addPresentedHandler { shown in
             // Zero when the frame was never shown.
             let at = shown.presentedTime
+            if at == 0 {
+                timingLog.notice("Frame dropped")
+            } else if timing.mutex.withLock({ $0.isLate(promised: presentingAt, presented: at, period: period) }) {
+                timingLog.notice(
+                    "Frame late by \(String(format: "%.1f", (at - presentingAt) * 1000), privacy: .public) ms")
+            }
             timing.mutex.withLock {
                 $0.presented(promised: presentingAt, at: at > 0 ? at : nil, sampledAt: now, period: period)
             }
         }
         renderer.draw(to: drawable, images: images, room: result.room, sharpen: sharpen, softEdges: softEdges) {
             gpuEnd in
+            if gpuEnd - now > period {
+                timingLog.notice(
+                    "Frame took \(String(format: "%.1f", (gpuEnd - now) * 1000), privacy: .public) ms from pose to GPU done")
+            }
             timing.mutex.withLock { $0.worked(gpuEnd - now, period: period) }
         }
         if result.biasChanged {
@@ -584,7 +598,6 @@ final class FrameLoop: @unchecked Sendable {
             frameLoop.render(to: drawable, presentingAt: presentingAt, deadline: deadline)
         }
         window = GlassesWindow(device: renderer.device, displayLink: displayLink)
-        window.fullScreen = settings.fullScreenWindow
         frameLoop.onBiasChanged = { [weak self] in Task { @MainActor in self?.saveSettings() } }
 
         window.view.onKey = { [unowned self] event in handleKey(event) }
@@ -646,6 +659,7 @@ final class FrameLoop: @unchecked Sendable {
     }
 
     func saveSettings() {
+        timingLog.notice("Saving settings")
         let bias = tracking.snapshot().thermalBias
         let settings = shared.mutex.withLock { state in
             state.viewport.store(into: &state.settings)
@@ -715,7 +729,6 @@ final class FrameLoop: @unchecked Sendable {
                 }
                 persist = restartSource
             case .toggleLatePoseSampling: state.settings.latePoseSampling.toggle()
-            case .toggleFullScreenWindow: state.settings.fullScreenWindow.toggle()
             case .toggleSharpFiltering: state.settings.sharpFiltering.toggle()
             case .toggleLivePointer:
                 // The captures leave the pointer out while it is drawn live.
@@ -740,9 +753,6 @@ final class FrameLoop: @unchecked Sendable {
             restartPinned()
         }
         switch command {
-        case .toggleFullScreenWindow:
-            window.fullScreen = shared.mutex.withLock { $0.settings.fullScreenWindow }
-            window.place()
         case .toggleStatusStrip: updateDashboard()
         case .toggleLivePointer: updatePointer()
         default: break
@@ -874,6 +884,7 @@ final class FrameLoop: @unchecked Sendable {
             }
             let fps = now - lastInView[index] < inViewHold ? fullFps : outOfViewFps
             if capture.fps != fps {
+                timingLog.notice("Capture tile \(index, privacy: .public) to \(fps, privacy: .public) fps")
                 Task { await capture.setFps(fps) }
             }
         }
@@ -974,6 +985,13 @@ final class FrameLoop: @unchecked Sendable {
             return
         }
         window.show()
+        // For measuring the glasses' output on its own: no canvas, no
+        // captures, only black frames, still timed.
+        if ProcessInfo.processInfo.environment["XREAL_NO_CANVAS"] != nil {
+            canvasScreen = nil
+            setSource(.failed("No canvas, for testing"), captures: [])
+            return
+        }
         let (canvas, rate, livePointer) = shared.mutex.withLock {
             ($0.settings.canvas, $0.settings.canvasRefreshRate, $0.settings.livePointer)
         }
@@ -995,6 +1013,11 @@ final class FrameLoop: @unchecked Sendable {
         let frame = await ScreenCapture.shareableFrame(of: screen.displayID, timeout: virtualScreenTimeout)
         guard !Task.isCancelled else { return }
         arrangeCanvas()
+        // For measuring the canvas's display on its own, never captured.
+        if ProcessInfo.processInfo.environment["XREAL_NO_CAPTURE"] != nil {
+            setSource(.failed("Canvas not captured, for testing"), captures: [])
+            return
+        }
         // Looked up once for every tile.
         let content = try? await ScreenCapture.content()
         guard !Task.isCancelled else { return }
@@ -1081,6 +1104,7 @@ final class FrameLoop: @unchecked Sendable {
     }
 
     private func restartPinned() {
+        timingLog.notice("Looking for the pinned window")
         pinnedTask?.cancel()
         pinnedTask = Task { await switchPinned() }
     }

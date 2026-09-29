@@ -60,7 +60,8 @@ final class DisplayLinkThread: NSObject, CAMetalDisplayLinkDelegate, @unchecked 
         link.preferredFrameRateRange = CAFrameRateRange(minimum: fps, maximum: fps, preferred: fps)
         // One frame in flight: the pose sampled for a frame is at most one
         // refresh old when it is shown.
-        link.preferredFrameLatency = 1
+        link.preferredFrameLatency =
+            ProcessInfo.processInfo.environment["XREAL_FRAME_LATENCY"].flatMap(Float.init) ?? 1
         link.delegate = self
         link.add(to: .current, forMode: .default)
         self.link = link

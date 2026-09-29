@@ -1,6 +1,5 @@
 import AppKit
 import QuartzCore
-import XrealCore
 
 /// Identifies the glasses and the other displays.
 enum Displays {
@@ -127,16 +126,10 @@ final class MetalView: NSView {
 }
 
 /// Full screen on the glasses, hidden while they are not connected.
-@MainActor final class GlassesWindow: NSObject, NSWindowDelegate {
+@MainActor final class GlassesWindow {
     let view: MetalView
     private let window: NSWindow
     private let displayLink: DisplayLinkThread
-    /// Shows the view as a full-screen window in a space of its own, which
-    /// macOS may send to the glasses without compositing it with anything,
-    /// rather than as a borderless window above everything. Takes effect at
-    /// the next `place()`.
-    var fullScreen = false
-    private var changingFullScreen = false
 
     init(device: MTLDevice, displayLink: DisplayLinkThread) {
         self.displayLink = displayLink
@@ -144,14 +137,12 @@ final class MetalView: NSView {
         window = KeyWindow(
             contentRect: NSRect(x: 0, y: 0, width: 960, height: 540),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        super.init()
         window.title = "XREAL Viewer"
         window.isReleasedWhenClosed = false
         window.backgroundColor = .black
         window.isOpaque = true
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.contentView = view
-        window.delegate = self
     }
 
     var windowID: CGWindowID {
@@ -167,9 +158,6 @@ final class MetalView: NSView {
     }
 
     func hide() {
-        if window.styleMask.contains(.fullScreen) {
-            window.toggleFullScreen(nil)
-        }
         window.orderOut(nil)
     }
 
@@ -180,51 +168,12 @@ final class MetalView: NSView {
             hide()
             return
         }
-        guard !changingFullScreen else { return }
-        let isFullScreen = window.styleMask.contains(.fullScreen)
-        // A full-screen window takes every display when the displays share
-        // their spaces; then the glasses keep the borderless window.
-        let wantsFullScreen = fullScreen && NSScreen.screensHaveSeparateSpaces
-        if wantsFullScreen != isFullScreen {
-            if isFullScreen {
-                // Placed again once it has left full screen.
-                changingFullScreen = true
-                window.toggleFullScreen(nil)
-                return
-            }
-            window.styleMask = [.titled, .resizable]
-            window.level = .normal
-            window.collectionBehavior = [.fullScreenPrimary]
-            window.setFrame(screen.frame, display: true)
-            window.orderFrontRegardless()
-            changingFullScreen = true
-            window.toggleFullScreen(nil)
-        } else if !isFullScreen {
-            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            window.styleMask = [.borderless]
-            // Above the menu bar and Dock of that screen.
-            window.level = .statusBar
-            window.setFrame(screen.frame, display: true)
-            window.orderFrontRegardless()
-        }
+        window.styleMask = [.borderless]
+        // Above the menu bar and Dock of that screen.
+        window.level = .statusBar
+        window.setFrame(screen.frame, display: true)
+        window.orderFrontRegardless()
         // Recreated so the link runs at the refresh rate of this screen.
         displayLink.attach(to: view.metalLayer, fps: screen.maximumFramesPerSecond)
-    }
-
-    func windowDidEnterFullScreen(_ notification: Notification) {
-        changingFullScreen = false
-        place()
-    }
-
-    func windowDidExitFullScreen(_ notification: Notification) {
-        changingFullScreen = false
-        place()
-    }
-
-    func windowDidFailToEnterFullScreen(_ window: NSWindow) {
-        changingFullScreen = false
-        eprint("The glasses' window could not go full screen")
-        fullScreen = false
-        place()
     }
 }

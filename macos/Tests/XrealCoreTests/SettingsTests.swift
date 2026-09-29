@@ -147,7 +147,6 @@ import simd
     settings.canvas = RoomScreen(width: 2880, height: 1620, scale: 2, curved: true, spherical: true, verticalWrap: 0.6)
     settings.canvasRefreshRate = 60
     settings.latePoseSampling = false
-    settings.fullScreenWindow = true
     settings.sharpFiltering = false
     settings.livePointer = false
     settings.statusStrip = false

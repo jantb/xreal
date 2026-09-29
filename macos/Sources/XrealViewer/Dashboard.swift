@@ -64,6 +64,11 @@ final class Dashboard: @unchecked Sendable {
     private let busy = Mutex(false)
     // Touched only on `queue`.
     private var monitor = SystemMonitor()
+    /// The textures drawn into in turn, so one is never written while the
+    /// GPU may still read it. A new one each time made the GPU's driver
+    /// allocate several megabytes ten times a second.
+    private var textures: [MTLTexture] = []
+    private var nextTexture = 0
     private var latencyHistory = History(capacity: 300)
 
     init(device: MTLDevice) {
@@ -79,8 +84,14 @@ final class Dashboard: @unchecked Sendable {
         }
         guard busy.withLock({ busy in defer { busy = true }; return !busy }) else { return }
         queue.async { [self] in
+            let started = monotonicNow()
             let drawn = draw(glasses: glasses, now: .now)
-            latest.publish(drawn.flatMap { image(of: $0.bitmap, width: $0.width, height: $0.height, device: device) })
+            let frame = drawn.flatMap { upload($0.bitmap, width: $0.width, height: $0.height) }
+            let took = monotonicNow() - started
+            if took > 0.06 {
+                timingLog.notice("Dashboard update took \(String(format: "%.1f", took * 1000), privacy: .public) ms")
+            }
+            latest.publish(frame)
             busy.withLock { $0 = false }
         }
     }
@@ -106,6 +117,26 @@ final class Dashboard: @unchecked Sendable {
         context.fill(bounds)
         context.draw(image, in: bounds)
         return context.makeImage().flatMap { NSBitmapImageRep(cgImage: $0).representation(using: .png, properties: [:]) }
+    }
+
+    /// `bitmap` in the next of the textures drawn into in turn, made again
+    /// when the dashboard's size changes.
+    private func upload(_ bitmap: Data, width: Int, height: Int) -> CapturedFrame? {
+        if textures.first.map({ $0.width != width || $0.height != height }) ?? true {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm_srgb, width: width, height: height, mipmapped: false)
+            descriptor.usage = .shaderRead
+            textures = (0..<3).compactMap { _ in device.makeTexture(descriptor: descriptor) }
+            guard textures.count == 3 else { return nil }
+        }
+        let texture = textures[nextTexture]
+        nextTexture = (nextTexture + 1) % textures.count
+        bitmap.withUnsafeBytes { bytes in
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, withBytes: bytes.baseAddress!,
+                bytesPerRow: width * 4)
+        }
+        return CapturedFrame(texture: texture, pixelsPerPoint: overlayPixelsPerPoint)
     }
 
     /// Waits for any update under way, for tests and `--dashboard`.
