@@ -102,12 +102,6 @@ import simd
     #expect(Settings.parse("sphere_curve=1.5\n").curveRadius == 1.5)
 }
 
-@Test func swappedEyesStaySwappedAfterARestart() {
-    var settings = Settings()
-    settings.swapEyes = true
-    #expect(Settings.parse(settings.serialize()).swapEyes)
-}
-
 @Test func theDepthScaleStaysChosenAfterARestart() {
     var settings = Settings()
     settings.metresPerRoomUnit = 2

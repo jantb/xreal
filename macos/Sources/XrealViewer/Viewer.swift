@@ -65,6 +65,30 @@ let canvasSizes: [(width: Int, height: Int)] = [
     (1920, 1080), (2880, 1620), (5120, 1440), (3832, 2160), (5752, 2160), (5752, 2880), (7672, 2160), (7672, 4320),
 ]
 
+/// What the glasses show, or why they show nothing.
+enum SourceStatus: Equatable, Sendable {
+    case starting
+    case noGlasses
+    case creatingCanvas
+    /// macOS would not create the canvas at its size.
+    case refused
+    case live(width: Int, height: Int)
+    /// The canvas exists but did not come online or could not be captured.
+    case failed(String)
+
+    /// The status in the status lines' capitals.
+    var hudDescription: String {
+        switch self {
+        case .starting: "SOURCE STARTING"
+        case .noGlasses: "GLASSES NOT CONNECTED"
+        case .creatingCanvas: "CREATING THE CANVAS"
+        case .refused: "MACOS REFUSED THE CANVAS - TRY ANOTHER SIZE"
+        case .live(let width, let height): "CANVAS \(width)X\(height)"
+        case .failed(let problem): problem.uppercased()
+        }
+    }
+}
+
 enum ViewerCommand {
     case recenter
     /// Puts the canvas back straight ahead, level and at the glasses' own
@@ -75,7 +99,6 @@ enum ViewerCommand {
     case toggleFollowCursor
     case toggleStatus
     case setCurveRadius(Float)
-    case toggleSwapEyes
     case toggleLensCorrection
     case setDepthScale(Float)
     case calibrate
@@ -86,6 +109,7 @@ enum ViewerCommand {
     case moveCanvas(closer: Bool)
     /// Makes the canvas larger (true) or smaller.
     case resizeCanvas(bigger: Bool)
+    case setCanvasSize(width: Int, height: Int)
     /// Moves the focused window to where the viewer is looking.
     case moveWindowToGaze
     /// Fits the focused window into the zone the viewer is looking at.
@@ -108,7 +132,7 @@ struct ViewerState: Sendable {
     /// Where the glasses' own display is in the arrangement, kept free of
     /// the mouse.
     var cursorFence: CGRect?
-    var sourceDescription = "SOURCE STARTING"
+    var source = SourceStatus.starting
     /// The canvas's display in global coordinates, to find the cursor on it.
     var canvasBounds: CGRect?
     /// One per capture tile of the canvas, left to right.
@@ -184,8 +208,14 @@ struct ViewerState: Sendable {
             bigger
             ? canvasSizes.first { $0.width * $0.height > area } : canvasSizes.last { $0.width * $0.height < area }
         guard let size else { return false }
-        settings.canvas.width = size.width
-        settings.canvas.height = size.height
+        return setCanvasSize(width: size.width, height: size.height, now: now)
+    }
+
+    /// Returns whether the size changed, so the canvas is created again.
+    mutating func setCanvasSize(width: Int, height: Int, now: Double) -> Bool {
+        guard width != settings.canvas.width || height != settings.canvas.height else { return false }
+        settings.canvas.width = width
+        settings.canvas.height = height
         grab = nil
         gaze = nil
         outlineUntil = now + outlineTime
@@ -265,9 +295,6 @@ struct ViewerState: Sendable {
             }
             return eye
         }
-        if settings.swapEyes {
-            room.eyes.reverse()
-        }
         capturesInView = Array(repeating: false, count: frameSizes.count)
         for panel in room.panels where panel.source < frameSizes.count && room.shows(panel, margin: inViewMargin) {
             capturesInView[panel.source] = true
@@ -290,7 +317,7 @@ struct ViewerState: Sendable {
 
     func hudInfo(now: Double) -> HudInfo {
         HudInfo(
-            gaze: gaze, source: sourceSize, sourceDescription: sourceDescription, output: output,
+            gaze: gaze, source: sourceSize, sourceDescription: source.hudDescription, output: output,
             newFrame: newFrame, stats: stats, tracking: snapshot, pose: lastPose, prediction: settings.prediction,
             lastDrift: lastDrift, now: now)
     }
@@ -460,9 +487,9 @@ final class FrameLoop: @unchecked Sendable {
         shared.mutex.withLock { ($0.settings, $0.viewport) }
     }
 
-    func statusLines() -> [String] {
-        let info = shared.mutex.withLock { $0.hudInfo(now: monotonicNow()) }
-        return hudLines(info)
+    /// What the status lines are made from.
+    func statusInfo() -> (info: HudInfo, source: SourceStatus) {
+        shared.mutex.withLock { ($0.hudInfo(now: monotonicNow()), $0.source) }
     }
 
     /// Leaves the glasses showing their own picture, as before the viewer ran.
@@ -509,7 +536,6 @@ final class FrameLoop: @unchecked Sendable {
             case .toggleRoll: state.viewport.followsRoll.toggle()
             case .toggleFollowCursor: state.settings.followCursor.toggle()
             case .toggleStatus: state.settings.overlayVisible.toggle()
-            case .toggleSwapEyes: state.settings.swapEyes.toggle()
             case .toggleLensCorrection: state.settings.lensCorrection.toggle()
             case .setDepthScale(let metres): state.settings.metresPerRoomUnit = metres
             case .setCurveRadius(let radius): state.settings.curveRadius = radius
@@ -527,6 +553,9 @@ final class FrameLoop: @unchecked Sendable {
                 state.moveCanvas(closer: closer, now: monotonicNow())
             case .resizeCanvas(let bigger):
                 restartSource = state.resizeCanvas(bigger: bigger, now: monotonicNow())
+                persist = restartSource
+            case .setCanvasSize(let width, let height):
+                restartSource = state.setCanvasSize(width: width, height: height, now: monotonicNow())
                 persist = restartSource
             case .moveWindowToGaze, .fitWindowToZone, .movePointerToGaze, .gatherWindows:
                 break
@@ -730,11 +759,11 @@ final class FrameLoop: @unchecked Sendable {
         sourceTask = Task { await switchSource() }
     }
 
-    private func setSource(description: String, captures: [ScreenCapture]) {
+    private func setSource(_ status: SourceStatus, captures: [ScreenCapture]) {
         self.captures = captures
         let latest = captures.map(\.latest)
         shared.mutex.withLock { state in
-            state.sourceDescription = description
+            state.source = status
             state.captures = latest
             state.capturesInView = []
         }
@@ -748,19 +777,19 @@ final class FrameLoop: @unchecked Sendable {
         // capture, no window.
         guard Displays.glassesDisplay() != nil else {
             canvasScreen = nil
-            setSource(description: "GLASSES NOT CONNECTED", captures: [])
+            setSource(.noGlasses, captures: [])
             window.hide()
             return
         }
         window.show()
         let canvas = shared.mutex.withLock { $0.settings.canvas }
-        setSource(description: "CREATING THE CANVAS", captures: [])
+        setSource(.creatingCanvas, captures: [])
         // A canvas of the same size is kept, so it stays put.
         if canvasScreen.map({ $0.width != canvas.width || $0.height != canvas.height }) ?? true {
             canvasScreen = VirtualScreen(index: 0, width: canvas.width, height: canvas.height, refreshRate: refreshRate)
         }
         guard let screen = canvasScreen else {
-            setSource(description: "MACOS REFUSED THE CANVAS - TRY ANOTHER SIZE", captures: [])
+            setSource(.refused, captures: [])
             return
         }
         let frame = await ScreenCapture.shareableFrame(of: screen.displayID, timeout: virtualScreenTimeout)
@@ -789,9 +818,11 @@ final class FrameLoop: @unchecked Sendable {
             }
         }
         if frame == nil {
-            problems.append("THE CANVAS DID NOT COME ONLINE")
+            problems.append("The canvas did not come online")
         }
-        setSource(description: problems.first ?? "CANVAS \(screen.width)X\(screen.height)", captures: started)
+        setSource(
+            problems.first.map(SourceStatus.failed) ?? .live(width: screen.width, height: screen.height),
+            captures: started)
     }
 
     /// Starts capturing `displayID`, or the part `sourceRect` of it. The
@@ -808,9 +839,9 @@ final class FrameLoop: @unchecked Sendable {
                     excludedWindowID: window.windowID)
                 return (capture, nil)
             } catch {
-                let permission = CGPreflightScreenCaptureAccess() ? "" : " - ALLOW SCREEN RECORDING AND RELAUNCH"
+                let permission = CGPreflightScreenCaptureAccess() ? "" : " - allow Screen Recording and relaunch"
                 eprint("Screen capture failed: \(error)")
-                return (capture, "CAPTURE FAILED: \(error.localizedDescription.uppercased())\(permission)")
+                return (capture, "Capture failed: \(error.localizedDescription)\(permission)")
             }
         } catch {
             fatalError("Could not create a Metal texture cache: \(error)")

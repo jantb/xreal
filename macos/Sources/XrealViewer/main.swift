@@ -4,6 +4,7 @@ import XrealCore
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     private var viewer: Viewer?
     private var menu: StatusMenu?
+    private var controls: ControlPanel?
     private var activity: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -12,21 +13,47 @@ import XrealCore
         if let iconURL, let icon = NSImage(contentsOf: iconURL) {
             NSApp.applicationIconImage = icon
         }
-        if !CGPreflightScreenCaptureAccess() {
+        let canCapture = CGPreflightScreenCaptureAccess()
+        if !canCapture {
             CGRequestScreenCaptureAccess()
         }
+        NSApp.mainMenu = mainMenu()
         // Keeps macOS from napping or coalescing timers while other apps
         // have focus, which is most of the time.
         activity = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiated, .latencyCritical], reason: "Rendering head-tracked video")
         do {
             let viewer = try Viewer(settings: Settings.load())
+            let controls = ControlPanel(viewer: viewer)
             self.viewer = viewer
-            menu = StatusMenu(viewer: viewer)
+            self.controls = controls
+            menu = StatusMenu(viewer: viewer, controls: controls)
+            // Without Screen Recording there is nothing to show; the
+            // controls say what to do.
+            if !canCapture {
+                controls.show()
+            }
         } catch {
             eprint("Failed to start: \(error)")
             NSApp.terminate(nil)
         }
+    }
+
+    /// Never shown, as the app has no menu bar of its own, but gives the
+    /// controls window its standard keys.
+    private func mainMenu() -> NSMenu {
+        let app = NSMenu()
+        app.addItem(withTitle: "Quit XREAL Viewer", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let window = NSMenu(title: "Window")
+        window.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        let main = NSMenu()
+        for submenu in [app, window] {
+            let item = NSMenuItem()
+            item.submenu = submenu
+            main.addItem(item)
+        }
+        return main
     }
 
     func applicationWillTerminate(_ notification: Notification) {

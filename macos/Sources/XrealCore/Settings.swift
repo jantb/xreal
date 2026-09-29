@@ -7,7 +7,7 @@ private let maxCurveRadius: Float = 10
 /// file is shared with the Rust version of the app.
 public struct Settings: Equatable, Sendable {
     public var prediction = true
-    /// Whether the status lines show in the menu bar menu.
+    /// Whether the diagnostics show in the controls window.
     public var overlayVisible = true
     /// Gyro bias at the tracking's reference temperature, rad/s.
     public var gyroBias: SIMD3<Float> = .zero
@@ -25,9 +25,6 @@ public struct Settings: Equatable, Sendable {
     /// distance: 1 surrounds the viewer evenly, less bends it more, more
     /// bends it less.
     public var curveRadius: Float = 1
-    /// Shows the left eye's view to the right eye and the other way round,
-    /// for glasses that take the side-by-side halves the other way.
-    public var swapEyes = false
     /// Draws each eye through its lens's calibrated distortion, so straight
     /// edges stay straight to the corners of the view.
     public var lensCorrection = true
@@ -80,7 +77,6 @@ public struct Settings: Equatable, Sendable {
             case "glasses_only_screen": glassesOnlyScreen = glassesOnlyScreen ?? parseScreen(value)
             case "follow_roll": parse(value, into: &settings.followRoll)
             case "follow_cursor": parse(value, into: &settings.followCursor)
-            case "swap_eyes": parse(value, into: &settings.swapEyes)
             case "lens_correction": parse(value, into: &settings.lensCorrection)
             case "metres_per_room_unit":
                 if let metres = Float(value), metres.isFinite, metres > 0 {
@@ -113,7 +109,6 @@ public struct Settings: Equatable, Sendable {
             "follow_roll=\(followRoll)",
             "follow_cursor=\(followCursor)",
             "curve_radius=\(curveRadius)",
-            "swap_eyes=\(swapEyes)",
             "lens_correction=\(lensCorrection)",
             "metres_per_room_unit=\(metresPerRoomUnit)",
         ]
