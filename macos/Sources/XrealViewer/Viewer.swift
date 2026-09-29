@@ -372,11 +372,11 @@ struct ViewerState: Sendable {
             canvas: canvas, dashboard: settings.statusStrip ? extras.status : nil, pinned: extras.pinned)
         if overhead.height > 0 {
             let row = overheadPanels(canvas: canvas, curveRadius: curveRadius, layout: overhead)
-            if let rect = row.dashboard {
-                room.panels.append(RoomView.Panel(source: .status, surface: row.surface, rect: rect))
+            if let dashboard = row.dashboard {
+                room.panels.append(RoomView.Panel(source: .status, surface: dashboard.surface, rect: dashboard.rect))
             }
-            if let rect = row.pinned {
-                room.panels.append(RoomView.Panel(source: .pinned, surface: row.surface, rect: rect))
+            if let pinned = row.pinned {
+                room.panels.append(RoomView.Panel(source: .pinned, surface: pinned.surface, rect: pinned.rect))
             }
         }
         let surface = canvas.surface(curveRadius: curveRadius)

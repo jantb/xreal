@@ -123,7 +123,22 @@ private func elevation(_ point: SIMD3<Float>) -> Float {
     #expect(sample.memory != nil)
 }
 
-@Test func theTiltedRowStaysClearAboveEveryCanvasShape() throws {
+/// How high the canvas's top edge is, seen from the eyes as the canvas's
+/// own up goes, in the direction `azimuth` across: nil beyond its sides.
+private func topEdge(of screen: RoomScreen, atAzimuth azimuth: Float) -> Float? {
+    let turn = screen.placement.orientation.inverse
+    let edge = (0...256).map { step -> (azimuth: Float, elevation: Float) in
+        let point = turn.act(screen.surface().point(at: SIMD2(-1 + Float(step) / 128, 1)))
+        return (atan2(point.x, -point.z), elevation(point))
+    }
+    guard let index = edge.indices.dropLast().first(where: { edge[$0].azimuth <= azimuth && azimuth <= edge[$0 + 1].azimuth })
+    else { return nil }
+    let (a, b) = (edge[index], edge[index + 1])
+    let t = b.azimuth > a.azimuth ? (azimuth - a.azimuth) / (b.azimuth - a.azimuth) : 0
+    return a.elevation + (b.elevation - a.elevation) * t
+}
+
+@Test func whatHangsAboveStaysClearOfEveryCanvasShapeAndFacesTheEyes() throws {
     let shapes = [
         RoomScreen(width: 5752, height: 2160), RoomScreen(width: 5752, height: 2160, curved: true),
         RoomScreen(width: 5752, height: 2160, spherical: true),
@@ -133,18 +148,58 @@ private func elevation(_ point: SIMD3<Float>) -> Float {
         var screen = shape
         screen.placement = ScreenPlacement(direction: SIMD3(0.2, 0.1, -1), distance: 1.3, tilt: 0.1)
         let layout = overheadLayout(canvas: screen, dashboard: SIMD2(2400, 172), pinned: SIMD2(900, 700))
-        let row = overheadPanels(canvas: screen, layout: layout)
+        let panels = overheadPanels(canvas: screen, layout: layout)
         let turn = screen.placement.orientation.inverse
-        let seen = { (point: SIMD3<Float>) in elevation(turn.act(point)) }
-        for rect in [try #require(row.dashboard), try #require(row.pinned)] {
-            for x in [rect.left, 0, rect.right] {
-                let edge = screen.surface().point(at: SIMD2(min(max(x, -1), 1), 1))
-                #expect(seen(row.surface.point(at: SIMD2(x, rect.bottom))) > seen(edge), "shape \(index) x \(x)")
+        for (surface, rect) in [try #require(panels.dashboard), try #require(panels.pinned)] {
+            for x in [rect.left, (rect.left + rect.right) / 2, rect.right] {
+                // Above the canvas's top edge in the same direction.
+                let bottom = turn.act(surface.point(at: SIMD2(x, rect.bottom)))
+                let edge = try #require(topEdge(of: screen, atAzimuth: atan2(bottom.x, -bottom.z)))
+                #expect(elevation(bottom) > edge, "shape \(index) x \(x)")
             }
+            // Its middle faces the eyes.
+            let (midX, midY) = ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2)
+            let middle = surface.point(at: SIMD2(midX, midY))
+            let upward = surface.point(at: SIMD2(midX, midY + 0.01)) - surface.point(at: SIMD2(midX, midY - 0.01))
+            #expect(abs(dot(normalize(upward), normalize(middle))) < 1e-2, "shape \(index)")
         }
-        // Its middle faces the eyes.
-        let middle = row.surface.point(at: .zero)
-        let upward = row.surface.point(at: SIMD2(0, 0.01)) - row.surface.point(at: SIMD2(0, -0.01))
-        #expect(abs(dot(normalize(upward), normalize(middle))) < 1e-2, "shape \(index)")
     }
+}
+
+@Test func overAWrappedCanvasThePinnedWindowCurvesLikeItFacingTheEyesEverywhere() throws {
+    var screen = RoomScreen(width: 5752, height: 2160, spherical: true)
+    screen.placement = ScreenPlacement(direction: SIMD3(0, 0, -1), distance: 1.3)
+    let layout = overheadLayout(canvas: screen, dashboard: SIMD2(2400, 172), pinned: SIMD2(900, 700))
+    let panels = overheadPanels(canvas: screen, layout: layout)
+    // The dashboard too faces the eyes from every pixel.
+    let (board, boardRect) = try #require(panels.dashboard)
+    for x in [boardRect.left, 0, boardRect.right] {
+        let point = board.point(at: SIMD2(x, 0))
+        let across = board.point(at: SIMD2(x + 0.001, 0)) - board.point(at: SIMD2(x - 0.001, 0))
+        #expect(abs(simd_length(point) - 1.3) < 1e-3 && abs(dot(normalize(across), normalize(point))) < 1e-2, "x \(x)")
+    }
+    let (window, rect) = try #require(panels.pinned)
+    // Beside the dashboard, not over it: both across the same sphere.
+    #expect(rect.left > boardRect.right)
+    let (midX, midY) = ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2)
+    // Where the layout put it: beside the dashboard, off to the right.
+    #expect(window.point(at: SIMD2(midX, midY)).x > 0)
+    for x in [rect.left, midX, rect.right] {
+        for y in [rect.bottom, midY, rect.top] {
+            let point = window.point(at: SIMD2(x, y))
+            let across = window.point(at: SIMD2(x + 0.001, y)) - window.point(at: SIMD2(x - 0.001, y))
+            let upward = window.point(at: SIMD2(x, y + 0.001)) - window.point(at: SIMD2(x, y - 0.001))
+            // Every pixel as far away as the canvas and square to the eyes.
+            #expect(abs(simd_length(point) - 1.3) < 1e-3, "x \(x) y \(y)")
+            #expect(abs(dot(normalize(across), normalize(point))) < 1e-2, "x \(x) y \(y)")
+            #expect(abs(dot(normalize(upward), normalize(point))) < 1e-2, "x \(x) y \(y)")
+        }
+    }
+    // As many points across and up as the window has, at its middle.
+    let perPoint = 2 * tan(horizontalFov / 2) / 1920
+    let (dx, dy) = ((rect.right - rect.left) * 0.01, (rect.top - rect.bottom) * 0.01)
+    let width = simd_distance(window.point(at: SIMD2(midX - dx, midY)), window.point(at: SIMD2(midX + dx, midY))) / 0.02
+    let height = simd_distance(window.point(at: SIMD2(midX, midY - dy)), window.point(at: SIMD2(midX, midY + dy))) / 0.02
+    #expect(abs(width / perPoint - 900) < 9)
+    #expect(abs(height / perPoint - 700) < 7)
 }

@@ -80,7 +80,12 @@ public func overheadLayout(canvas: RoomScreen, dashboard: SIMD2<Float>?, pinned:
 /// eyes like a monitor hung overhead and angled down. Curved, it leans the
 /// same way all the way round, so its bottom edge follows the canvas's top
 /// edge.
-public func overheadSurface(canvas: RoomScreen, curveRadius: Float = 1, height: Float) -> ScreenSurface {
+///
+/// `raised` points lifts its bottom edge further, for a panel resting on
+/// another.
+public func overheadSurface(canvas: RoomScreen, curveRadius: Float = 1, height: Float, raised: Float = 0)
+    -> ScreenSurface
+{
     let canvasSurface = canvas.surface(curveRadius: curveRadius)
     let distance = canvas.placement.distance
     let turn = canvas.placement.orientation
@@ -92,7 +97,7 @@ public func overheadSurface(canvas: RoomScreen, curveRadius: Float = 1, height: 
         let point = turn.inverse.act(canvasSurface.point(at: SIMD2(-1 + Float(step) / 16, 1)))
         edge = max(edge, atan2(point.y, simd_length(SIMD2(point.x, point.z))))
     }
-    let bottom = distance * tan(min(edge, 1.3)) + overheadGap * roomUnitsPerPixel
+    let bottom = distance * tan(min(edge, 1.3)) + (overheadGap + raised) * roomUnitsPerPixel
     let halfRow = max(height, 1) * roomUnitsPerPixel / 2
     // Square to the line of sight at the row's middle, which itself moves
     // with the lean: a few rounds settle it. Upright it is shortened, so
@@ -111,13 +116,50 @@ public func overheadSurface(canvas: RoomScreen, curveRadius: Float = 1, height: 
         halfArc: canvas.spherical ? min(halfWidth / distance, 2.9) : canvasSurface.halfArc, spin: turn, lean: lean)
 }
 
-/// The surface the row above the canvas hangs on and where the dashboard
-/// and the pinned window are on it: `overheadSurface`, tilted to face the
-/// viewer.
+/// Where the dashboard and the pinned window hang, each as a surface and
+/// the part of it they cover: each a strip of `overheadSurface` from its own
+/// bottom, tilted to face the viewer at its own middle. Over a wrapped
+/// canvas each is instead part of the same sphere round the eyes, laid out
+/// as the canvas's rows are, so it curves both ways like the canvas below
+/// it and faces the eyes from every pixel.
 public func overheadPanels(canvas: RoomScreen, curveRadius: Float = 1, layout: OverheadLayout)
-    -> (surface: ScreenSurface, dashboard: SurfaceRect?, pinned: SurfaceRect?)
+    -> (dashboard: (surface: ScreenSurface, rect: SurfaceRect)?, pinned: (surface: ScreenSurface, rect: SurfaceRect)?)
 {
-    (overheadSurface(canvas: canvas, curveRadius: curveRadius, height: layout.height), layout.dashboard, layout.pinned)
+    let turn = canvas.placement.orientation
+    let distance = canvas.placement.distance
+    func panel(_ rect: SurfaceRect) -> (surface: ScreenSurface, rect: SurfaceRect) {
+        let points = { (y: Float) in (y + 1) / 2 * layout.height }
+        let height = points(rect.top) - points(rect.bottom)
+        let strip = overheadSurface(
+            canvas: canvas, curveRadius: curveRadius, height: height, raised: points(rect.bottom))
+        guard canvas.spherical else { return (strip, SurfaceRect(left: rect.left, right: rect.right, top: 1, bottom: -1)) }
+        // On the sphere round the eyes, laid out as the canvas's rows are:
+        // its bottom edge runs level along the canvas's top edge, and every
+        // pixel faces the eyes, square. Mercator rows shrink by cos(rise), so
+        // the panel is drawn larger by as much at its middle.
+        let seen = { (point: SIMD3<Float>) -> (across: Float, rise: Float) in
+            let local = turn.inverse.act(point)
+            return (atan2(local.x, -local.z), atan2(local.y, simd_length(SIMD2(local.x, local.z))))
+        }
+        let across = seen(strip.point(at: SIMD2((rect.left + rect.right) / 2, 0))).across
+        let bottom = mercatorHeight(seen(strip.point(at: SIMD2((rect.left + rect.right) / 2, -1))).rise)
+        let perPoint = roomUnitsPerPixel / distance
+        let width = (rect.right - rect.left) / 2 * Float(canvas.width) * perPoint
+        var top = bottom + height * perPoint
+        for _ in 0..<4 {
+            top = bottom + height * perPoint / cos(mercatorRise((bottom + top) / 2))
+        }
+        let halfWidth = width / 2 / cos(mercatorRise((bottom + top) / 2))
+        // Across as an angle over π, up as the Mercator height itself.
+        let sphere = ScreenSurface(
+            center: SIMD3(0, 0, -distance), right: SIMD3(distance * .pi, 0, 0), up: SIMD3(0, distance, 0),
+            halfArc: .pi, spin: turn, wrap: 1)
+        return (
+            sphere,
+            SurfaceRect(left: (across - halfWidth) / .pi, right: (across + halfWidth) / .pi, top: top, bottom: bottom)
+        )
+    }
+    return (layout.dashboard.map(panel), layout.pinned.map(panel))
 }
 
 /// Where a pointer image `size` points large, with its hot spot `hotSpot`
