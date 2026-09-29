@@ -159,7 +159,19 @@ public func overheadPanels(canvas: RoomScreen, curveRadius: Float = 1, layout: O
             SurfaceRect(left: (across - halfWidth) / .pi, right: (across + halfWidth) / .pi, top: top, bottom: bottom)
         )
     }
-    return (layout.dashboard.map(panel), layout.pinned.map(panel))
+    let dashboard = layout.dashboard.map(panel)
+    var pinned = layout.pinned.map(panel)
+    // Drawn larger on the sphere, the dashboard may reach into the gap
+    // beside it: the window moves over to keep that gap.
+    if canvas.spherical, let board = dashboard?.rect, let window = pinned?.rect, let beside = layout.pinned,
+        let under = layout.dashboard, beside.left > under.right
+    {
+        let gap = overheadSpacing * roomUnitsPerPixel / distance / .pi
+        let shift = max(board.right + gap - window.left, 0)
+        pinned?.rect = SurfaceRect(
+            left: window.left + shift, right: window.right + shift, top: window.top, bottom: window.bottom)
+    }
+    return (dashboard, pinned)
 }
 
 /// Where a pointer image `size` points large, with its hot spot `hotSpot`
