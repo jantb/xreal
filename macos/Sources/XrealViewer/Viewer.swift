@@ -116,6 +116,8 @@ enum ViewerCommand {
     case calibrate
     case toggleCurved
     case toggleSpherical
+    /// How far a wrapped canvas bends up and down, 0 to 1.
+    case setVerticalWrap(Float)
     /// Picks up (true) or lets go of (false) the canvas, if looked at.
     case grab(Bool)
     /// Brings the canvas closer (true) or pushes it away (false).
@@ -686,6 +688,7 @@ final class FrameLoop: @unchecked Sendable {
                 persist = false
             case .toggleCurved: state.settings.canvas.curved.toggle()
             case .toggleSpherical: state.settings.canvas.spherical.toggle()
+            case .setVerticalWrap(let wrap): state.settings.canvas.verticalWrap = min(max(wrap, 0), 1)
             case .grab(let pickUp):
                 // Saved once it is let go.
                 persist = pickUp ? false : state.endGrab()

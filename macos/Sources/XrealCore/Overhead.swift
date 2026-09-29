@@ -94,26 +94,43 @@ public func overheadSurface(canvas: RoomScreen, curveRadius: Float = 1, height: 
 }
 
 /// The surface the row above the canvas hangs on and where the dashboard
-/// and the pinned window are on it. A spherical canvas faces the viewer
-/// everywhere already, so the row simply carries on up the same sphere;
-/// any other gets `overheadSurface`.
+/// and the pinned window are on it: part of a sphere round the eyes, so
+/// every pixel of them faces the viewer from the same distance and keeps
+/// its size, whatever the canvas's shape. Its bottom edge runs level, a
+/// little above the highest the canvas's top edge reaches. A row so tall it
+/// would near the point straight overhead leans on `overheadSurface`
+/// instead.
 public func overheadPanels(canvas: RoomScreen, curveRadius: Float = 1, layout: OverheadLayout)
     -> (surface: ScreenSurface, dashboard: SurfaceRect?, pinned: SurfaceRect?)
 {
-    let surface = canvas.surface(curveRadius: curveRadius)
-    // How far round the sphere the row would reach above its middle.
-    let perPoint = 2 / Float(max(canvas.height, 1))
-    let bottom = 1 + overheadGap * perPoint
-    let reach = (bottom + layout.height * perPoint) * length(surface.up) / (length(surface.right) / max(surface.halfArc, 1e-6))
-    // Up to near the pole, where it would fold over; a taller row hangs
-    // tilted instead.
-    guard canvas.spherical, reach < 1.45 else {
+    let canvasSurface = canvas.surface(curveRadius: curveRadius)
+    let distance = canvas.placement.distance
+    let turn = canvas.placement.orientation
+    // How high the canvas's top edge reaches, seen from the eyes, as the
+    // canvas's own up goes.
+    var edge = -Float.pi / 2
+    for step in 0...32 {
+        let point = turn.inverse.act(canvasSurface.point(at: SIMD2(-1 + Float(step) / 16, 1)))
+        edge = max(edge, atan2(point.y, simd_length(SIMD2(point.x, point.z))))
+    }
+    // Round the sphere, a point of the canvas is this many radians.
+    let perPoint = roomUnitsPerPixel / distance
+    let bottom = edge + overheadGap * perPoint
+    let top = bottom + layout.height * perPoint
+    let halfWidth = Float(canvas.width) * roomUnitsPerPixel / 2
+    let halfArc = halfWidth / distance
+    // Rows are widened by 1 / cos(rise) to keep their pixels' size.
+    let widest = [layout.dashboard, layout.pinned].compactMap { $0 }.map { max(abs($0.left), abs($0.right)) }.max() ?? 0
+    guard top < 1.4, widest * halfArc / cos(top) < 0.95 * .pi else {
         return (
             overheadSurface(canvas: canvas, curveRadius: curveRadius, height: layout.height), layout.dashboard,
             layout.pinned
         )
     }
-    // From the row's positions to the canvas's, above its top edge.
+    // `up` as long as the radius, so positions up it are angles.
+    let sphere = ScreenSurface(
+        center: SIMD3(0, 0, -distance), right: SIMD3(halfWidth, 0, 0), up: SIMD3(0, distance, 0), halfArc: halfArc,
+        spin: turn, wrap: 1)
     func lifted(_ rect: SurfaceRect?) -> SurfaceRect? {
         rect.map {
             SurfaceRect(
@@ -121,7 +138,7 @@ public func overheadPanels(canvas: RoomScreen, curveRadius: Float = 1, layout: O
                 bottom: bottom + ($0.bottom + 1) / 2 * layout.height * perPoint)
         }
     }
-    return (surface, lifted(layout.dashboard), lifted(layout.pinned))
+    return (sphere, lifted(layout.dashboard), lifted(layout.pinned))
 }
 
 /// Where a pointer image `size` points large, with its hot spot `hotSpot`

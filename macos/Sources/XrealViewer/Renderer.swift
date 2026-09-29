@@ -15,7 +15,7 @@ private let shaderSource = """
         float4x4 scanEndViewProjection;  // as seen when the bottom row lights up
         float4 center, right, up;  // room coordinates; half extents
         float4 shape;              // x: half arc (0 flat), yz: left and right, w: segments
-        float4 rect;               // x: top, y: bottom, z: lean towards the viewer, w: 1 spherical
+        float4 rect;               // x: top, y: bottom, z: lean towards the viewer, w: how far columns wrap
         float4 outline;            // x: 1 to outline the canvas; y: rows it is drawn in; z: 1 to sharpen
         float4 spin0, spin1, spin2;  // turns the upright screen to its tilt
         float4 lens;               // xy: where the lens lookup starts, z: its step, w: 1 to use it
@@ -43,13 +43,17 @@ private let shaderSource = """
         float3 ahead = normalize(float3(panel.center.x, 0, panel.center.z));
         // How far towards the viewer the row at this height has come.
         float inward = panel.rect.z * (y + 1) * length(panel.up.xyz);
-        if (panel.shape.x > 0 && panel.rect.w > 0.5) {
-            // Spherical: the row's arc and the column's arc round one middle.
-            float radius = length(panel.right.xyz) / panel.shape.x;
-            float across = x * panel.shape.x;
-            float rise = y * length(panel.up.xyz) / radius;
+        if (panel.shape.x > 0 && panel.rect.w > 0) {
+            // Wrapped: the column's arc sets the row's height and circle,
+            // and the row is widened as its circle shrinks, so its pixels
+            // keep their size.
+            float rowRadius = length(panel.right.xyz) / panel.shape.x;
+            float columnRadius = rowRadius / panel.rect.w;
+            float rise = y * length(panel.up.xyz) / columnRadius;
+            float ring = rowRadius - columnRadius * (1 - cos(rise));
+            float across = x * panel.shape.x * rowRadius / ring;
             float3 level = sin(across) * normalize(panel.right.xyz) + cos(across) * ahead;
-            room = panel.center.xyz - radius * ahead + radius * (cos(rise) * level + sin(rise) * normalize(panel.up.xyz));
+            room = panel.center.xyz - rowRadius * ahead + ring * level + columnRadius * sin(rise) * normalize(panel.up.xyz);
         } else if (panel.shape.x > 0) {
             // Curved: the row's arc, narrowed by the lean, plus the column.
             float rowRadius = length(panel.right.xyz) / panel.shape.x;
@@ -319,9 +323,11 @@ final class Renderer: @unchecked Sendable {
             let rect = panel.rect
             // How wide and tall the piece looks, roughly, from its distance.
             let distance = max(length(surface.center), 1e-3)
+            // Rows widened on a wrapped surface need more pieces.
+            let widening = max(surface.rowWidening(at: rect.top), surface.rowWidening(at: rect.bottom))
             let arc =
                 surface.halfArc > 0
-                ? surface.halfArc * (rect.right - rect.left)
+                ? surface.halfArc * (rect.right - rect.left) * widening
                 : length(surface.right) * (rect.right - rect.left) / distance
             let segments = max(Int((arc / curveSegmentAngle).rounded(.up)), 1)
             let rows = max(Int((length(surface.up) * (rect.top - rect.bottom) / distance / rowAngle).rounded(.up)), 1)
@@ -331,7 +337,7 @@ final class Renderer: @unchecked Sendable {
                 viewProjection: viewProjection, scanEndViewProjection: scanEndViewProjection,
                 center: SIMD4(surface.center, 1), right: SIMD4(surface.right, 0), up: SIMD4(surface.up, 0),
                 shape: SIMD4(surface.halfArc, rect.left, rect.right, Float(segments)),
-                rect: SIMD4(rect.top, rect.bottom, surface.lean, surface.spherical ? 1 : 0),
+                rect: SIMD4(rect.top, rect.bottom, surface.lean, surface.wrap),
                 outline: SIMD4(panel.highlighted ? 1 : 0, Float(rows), isCanvas && sharpen ? 1 : 0, 0),
                 spin0: SIMD4(spin.columns.0, 0), spin1: SIMD4(spin.columns.1, 0), spin2: SIMD4(spin.columns.2, 0),
                 lens: lens, lensGrid: lensGrid)

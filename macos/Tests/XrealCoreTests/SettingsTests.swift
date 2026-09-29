@@ -144,7 +144,7 @@ import simd
 
 @Test func theNewerViewingChoicesStayChosenAfterARestart() {
     var settings = Settings()
-    settings.canvas = RoomScreen(width: 2880, height: 1620, scale: 2, curved: true, spherical: true)
+    settings.canvas = RoomScreen(width: 2880, height: 1620, scale: 2, curved: true, spherical: true, verticalWrap: 0.6)
     settings.canvasRefreshRate = 60
     settings.latePoseSampling = false
     settings.fullScreenWindow = true

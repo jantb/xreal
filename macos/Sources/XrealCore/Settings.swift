@@ -100,6 +100,7 @@ public struct Settings: Equatable, Sendable {
         // Written when there were several screens: the first one used with
         // the glasses alone was the canvas.
         var glassesOnlyScreen: RoomScreen?
+        var verticalWrap: Float?
         for line in text.split(whereSeparator: \.isNewline) {
             guard let separator = line.firstIndex(of: "=") else { continue }
             let key = line[..<separator].trimmingCharacters(in: .whitespaces)
@@ -141,6 +142,10 @@ public struct Settings: Equatable, Sendable {
                 if parts.count == 2, !parts[0].isEmpty {
                     settings.pinnedWindow = PinnedWindow(bundleID: String(parts[0]), title: String(parts[1]))
                 }
+            case "vertical_wrap":
+                if let wrap = Float(value), wrap.isFinite {
+                    verticalWrap = min(max(wrap, 0), 1)
+                }
             case "curve_radius", "sphere_curve":
                 if let radius = Float(value), radius.isFinite, radius > 0 {
                     settings.curveRadius = min(radius, maxCurveRadius)
@@ -150,6 +155,9 @@ public struct Settings: Equatable, Sendable {
         }
         if let screen = canvas ?? glassesOnlyScreen {
             settings.canvas = screen
+        }
+        if let verticalWrap {
+            settings.canvas.verticalWrap = verticalWrap
         }
         return settings
     }
@@ -166,6 +174,7 @@ public struct Settings: Equatable, Sendable {
             "gyro_bias_slope_y=\(gyroBiasSlope.y)",
             "gyro_bias_slope_z=\(gyroBiasSlope.z)",
             "canvas=\(Self.serialize(canvas))",
+            "vertical_wrap=\(canvas.verticalWrap)",
             "follow_roll=\(followRoll)",
             "follow_cursor=\(followCursor)",
             "curve_radius=\(curveRadius)",

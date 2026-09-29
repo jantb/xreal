@@ -136,14 +136,16 @@ public struct ScreenSurface: Equatable, Sendable {
     /// screen leaning so narrows towards its top like a lampshade, facing
     /// the viewer all the way round.
     public var lean: Float
-    /// A curved screen whose columns curve too, round the same middle as its
-    /// rows: part of a sphere, so every pixel faces the viewer when that
-    /// middle is at the eyes. `up` is then measured along the curve.
-    public var spherical: Bool
+    /// How far a curved screen's columns curve too, from 0, straight, to 1,
+    /// round the same middle as its rows: then it is part of a sphere, and
+    /// every pixel faces the viewer when that middle is at the eyes. Rows
+    /// away from the middle are widened to keep every pixel the same size.
+    /// `up` is then measured along the curve.
+    public var wrap: Float
 
     public init(
         center: SIMD3<Float>, right: SIMD3<Float>, up: SIMD3<Float>, halfArc: Float = 0,
-        spin: simd_quatf = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1), lean: Float = 0, spherical: Bool = false
+        spin: simd_quatf = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1), lean: Float = 0, wrap: Float = 0
     ) {
         self.center = center
         self.right = right
@@ -151,7 +153,7 @@ public struct ScreenSurface: Equatable, Sendable {
         self.halfArc = halfArc
         self.spin = spin
         self.lean = lean
-        self.spherical = spherical
+        self.wrap = wrap
     }
 
     /// The radius of each row's arc, for a curved screen.
@@ -174,12 +176,14 @@ public struct ScreenSurface: Equatable, Sendable {
             let tilted = lean == 0 ? .zero : lean * (position.y + 1) * length(up) * horizontalAhead
             return center + position.x * right + position.y * up - tilted
         }
-        let across = position.x * halfArc
-        if spherical {
-            let rise = position.y * length(up) / rowRadius
+        if wrap > 0 {
+            let row = wrappedRow(position.y)
+            // Widened as its circle shrinks, so its pixels keep their size.
+            let across = position.x * halfArc * rowRadius / row.radius
             let level = sin(across) * normalize(right) + cos(across) * horizontalAhead
-            return sphereMiddle + rowRadius * (cos(rise) * level + sin(rise) * normalize(up))
+            return sphereMiddle + row.radius * level + row.height * normalize(up)
         }
+        let across = position.x * halfArc
         // How far towards the viewer the row at this height has come.
         let inward = lean * (position.y + 1) * length(up)
         let radius = rowRadius - inward
@@ -187,9 +191,34 @@ public struct ScreenSurface: Equatable, Sendable {
             + radius * (sin(across) * normalize(right) + cos(across) * horizontalAhead)
     }
 
-    /// Where the rows' arcs, and a spherical screen's columns, are centred.
+    /// Where the rows' arcs, and a wrapped screen's columns, are centred.
     private var sphereMiddle: SIMD3<Float> {
         center - rowRadius * horizontalAhead
+    }
+
+    /// For a wrapped screen, the row at `y`, from -1 at the bottom to 1 at
+    /// the top: the radius of its circle and how far above the middle it
+    /// is, round its column's arc of radius `rowRadius / wrap`.
+    private func wrappedRow(_ y: Float) -> (radius: Float, height: Float) {
+        let columnRadius = rowRadius / wrap
+        let rise = y * length(up) / columnRadius
+        return (rowRadius - columnRadius * (1 - cos(rise)), columnRadius * sin(rise))
+    }
+
+    /// How much wider than the middle row the row at `y` is drawn round its
+    /// circle, to keep its pixels their size: 1 but on a wrapped screen.
+    public func rowWidening(at y: Float) -> Float {
+        wrap > 0 && halfArc > 0 ? rowRadius / max(wrappedRow(y).radius, 1e-4) : 1
+    }
+
+    /// Whether the surface carried on up to `y` stays clear of folding over
+    /// itself: on a wrapped screen, short of the pole and of rows wrapping
+    /// all the way round.
+    public func staysOpen(upTo y: Float) -> Bool {
+        guard wrap > 0, halfArc > 0 else { return true }
+        let row = wrappedRow(y)
+        return y * length(up) * wrap / rowRadius < 1.45 && row.radius > 0.2 * rowRadius
+            && halfArc * rowRadius / row.radius < 0.95 * .pi
     }
 
     /// Level unit vector towards the middle of the screen.
@@ -203,26 +232,45 @@ public struct ScreenSurface: Equatable, Sendable {
     func hit(gaze: SIMD3<Float>) -> (along: Float, at: SIMD2<Float>, miss: Float)? {
         let upright = spin.inverse.act(gaze)
         guard halfArc > 0 else { return flatHit(gaze: upright) }
-        return spherical ? sphericalHit(gaze: upright) : curvedHit(gaze: upright)
+        return wrap > 0 ? wrappedHit(gaze: upright) : curvedHit(gaze: upright)
     }
 
-    /// `hit(gaze:)` for a spherical screen: where the gaze leaves the
-    /// sphere, on the far side from wherever its middle is.
-    private func sphericalHit(gaze: SIMD3<Float>) -> (along: Float, at: SIMD2<Float>, miss: Float)? {
-        let middle = sphereMiddle
-        let towards = dot(gaze, middle)
-        let discriminant = towards * towards - dot(middle, middle) + rowRadius * rowRadius
-        guard discriminant >= 0 else { return nil }
-        let along = towards + discriminant.squareRoot()
-        guard along > 1e-4 else { return nil }
-        let unit = (gaze * along - middle) / rowRadius
-        let rise = asin(min(max(dot(unit, normalize(up)), -1), 1))
-        let across = atan2(dot(unit, normalize(right)), dot(unit, horizontalAhead))
-        let halfRise = length(up) / rowRadius
-        // Past the edge by an angle round the sphere's middle; seen from the
-        // eyes, that many radii along the sphere over the distance to it.
-        let past = max(abs(across) - halfArc, abs(rise) - halfRise, 0)
-        return (along, SIMD2(across / halfArc, -rise / halfRise), past * rowRadius / along)
+    /// `hit(gaze:)` for a wrapped screen: the position whose direction from
+    /// the eyes is the gaze, found by Newton's method from where it would
+    /// be on a sphere round the eyes.
+    private func wrappedHit(gaze: SIMD3<Float>) -> (along: Float, at: SIMD2<Float>, miss: Float)? {
+        let helper = abs(gaze.y) < 0.9 ? SIMD3<Float>(0, 1, 0) : SIMD3(1, 0, 0)
+        let (first, second) = (normalize(cross(gaze, helper)), normalize(cross(gaze, normalize(cross(gaze, helper)))))
+        // How far the position's direction is off the gaze, sideways and up.
+        func off(_ position: SIMD2<Float>) -> SIMD2<Float> {
+            let seen = normalize(uprightPoint(at: position))
+            return SIMD2(dot(seen, first), dot(seen, second))
+        }
+        let across = atan2(dot(gaze, normalize(right)), dot(gaze, horizontalAhead))
+        let rise = asin(min(max(dot(gaze, normalize(up)), -1), 1))
+        var position = SIMD2(across / halfArc, rise * rowRadius / length(up))
+        let step: Float = 1e-3
+        for _ in 0..<20 {
+            let miss = off(position)
+            if simd_length(miss) < 1e-6 { break }
+            let alongX = (off(position + SIMD2(step, 0)) - miss) / step
+            let alongY = (off(position + SIMD2(0, step)) - miss) / step
+            let determinant = alongX.x * alongY.y - alongY.x * alongX.y
+            guard abs(determinant) > 1e-12 else { return nil }
+            var move = SIMD2(
+                (miss.x * alongY.y - alongY.x * miss.y) / determinant,
+                (alongX.x * miss.y - alongX.y * miss.x) / determinant)
+            // Small steps, so a far start does not jump past the answer.
+            let size = simd_length(move)
+            if size > 0.5 { move *= 0.5 / size }
+            position -= move
+        }
+        let point = uprightPoint(at: position)
+        guard simd_length(off(position)) < 1e-3, dot(point, gaze) > 0 else { return nil }
+        // How far off the nearest point on the screen the gaze is.
+        let edge = normalize(uprightPoint(at: simd_clamp(position, SIMD2(repeating: -1), SIMD2(repeating: 1))))
+        let past = acos(min(max(dot(edge, gaze), -1), 1))
+        return (simd_length(point), SIMD2(position.x, -position.y), past < 1e-4 ? 0 : past)
     }
 
     /// `hit(gaze:)` for a curved screen. Each angle round the row fixes how
@@ -305,14 +353,17 @@ public struct RoomScreen: Equatable, Sendable {
     public var placement: ScreenPlacement
     /// Bent around the viewer, so every part of a row is equally far away.
     public var curved: Bool
-    /// Bent both ways, as part of a sphere round the viewer, so every pixel
-    /// is equally far away and faces them. Curved whether or not `curved`
-    /// is set.
+    /// Bent both ways round the viewer, `verticalWrap` of the way to a
+    /// sphere, where every pixel is equally far away and faces them. Curved
+    /// whether or not `curved` is set.
     public var spherical: Bool
+    /// How far a spherical screen's columns bend, from 0, straight, to 1,
+    /// part of a sphere round the eyes.
+    public var verticalWrap: Float
 
     public init(
         width: Int, height: Int, scale: Int = 1, placement: ScreenPlacement = .straightAhead, curved: Bool = false,
-        spherical: Bool = false
+        spherical: Bool = false, verticalWrap: Float = 1
     ) {
         self.width = width
         self.height = height
@@ -320,6 +371,7 @@ public struct RoomScreen: Equatable, Sendable {
         self.placement = placement
         self.curved = curved
         self.spherical = spherical
+        self.verticalWrap = verticalWrap
     }
 
     /// Whether a virtual screen of this size can be made without upsetting
@@ -344,7 +396,8 @@ public struct RoomScreen: Equatable, Sendable {
 
     /// Where the screen is in the room. A curved screen's rows are arcs with
     /// a radius `curveRadius` times its distance: 1 surrounds the viewer
-    /// evenly, less bends it more, more bends it less.
+    /// evenly, less bends it more, more bends it less. A spherical one is
+    /// always centred on the viewer, bending up and down by `verticalWrap`.
     public func surface(curveRadius: Float = 1) -> ScreenSurface {
         let (center, right, up) = placement.frame(width: width, height: height)
         guard curved || spherical else {
@@ -354,11 +407,22 @@ public struct RoomScreen: Equatable, Sendable {
         // viewer, then turned as a whole to where it hangs: raised, lowered
         // or tilted, it looks the same as straight ahead when faced.
         let (halfWidth, halfHeight) = (length(right), length(up))
-        let rowRadius = max(
-            placement.distance * curveRadius, halfWidth / maxHalfArc, spherical ? halfHeight / maxHalfRise : 0)
+        let wrap = spherical ? min(max(verticalWrap, 0), 1) : 0
+        var rowRadius = max(placement.distance * (spherical ? 1 : curveRadius), halfWidth / maxHalfArc)
+        if wrap > 0 {
+            // Opened out until the top and bottom rows neither pass the
+            // poles nor, widened to keep their pixels' size, wrap too far.
+            for _ in 0..<80 {
+                let columnRadius = rowRadius / wrap
+                let rise = halfHeight / columnRadius
+                let edgeRow = rowRadius - columnRadius * (1 - cos(rise))
+                if rise <= maxHalfRise, edgeRow >= 0.35 * rowRadius, halfWidth / edgeRow <= maxHalfArc { break }
+                rowRadius *= 1.05
+            }
+        }
         return ScreenSurface(
             center: SIMD3(0, 0, -placement.distance), right: SIMD3(halfWidth, 0, 0), up: SIMD3(0, halfHeight, 0),
-            halfArc: halfWidth / rowRadius, spin: placement.orientation, spherical: spherical)
+            halfArc: halfWidth / rowRadius, spin: placement.orientation, wrap: wrap)
     }
 }
 

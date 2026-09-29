@@ -252,19 +252,35 @@ private struct CanvasSection: View {
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }
-            VStack(alignment: .leading) {
-                LabeledContent("Curve") {
-                    Text(String(format: "Radius %.2f × distance", settings.curveRadius)).monospacedDigit()
-                }
-                // Stronger to the right, which is a smaller radius.
-                Slider(
-                    value: Binding(
-                        get: { -log(settings.curveRadius) }, set: { model.perform(.setCurveRadius(exp(-$0))) }),
-                    in: -log(maxCurveRadius)...(-log(minCurveRadius)))
-                Text("At 1 the canvas surrounds you evenly; further right bends it more.")
+            if settings.canvas.spherical {
+                VStack(alignment: .leading) {
+                    LabeledContent("Wrap Up and Down") {
+                        Text(String(format: "%.0f%%", settings.canvas.verticalWrap * 100)).monospacedDigit()
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { settings.canvas.verticalWrap }, set: { model.perform(.setVerticalWrap($0)) }),
+                        in: 0...1)
+                    Text(
+                        "At 100% the canvas is part of a ball round you: every pixel faces you and keeps its size. Less bends it less up and down."
+                    )
                     .font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                VStack(alignment: .leading) {
+                    LabeledContent("Curve") {
+                        Text(String(format: "Radius %.2f × distance", settings.curveRadius)).monospacedDigit()
+                    }
+                    // Stronger to the right, which is a smaller radius.
+                    Slider(
+                        value: Binding(
+                            get: { -log(settings.curveRadius) }, set: { model.perform(.setCurveRadius(exp(-$0))) }),
+                        in: -log(maxCurveRadius)...(-log(minCurveRadius)))
+                    Text("At 1 the canvas surrounds you evenly; further right bends it more.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .disabled(!settings.canvas.curved)
             }
-            .disabled(!settings.canvas.curved && !settings.canvas.spherical)
             VStack(alignment: .leading) {
                 LabeledContent("Viewing Distance") {
                     Text(String(format: "%.2f m", settings.metresPerRoomUnit)).monospacedDigit()

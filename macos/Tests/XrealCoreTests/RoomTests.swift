@@ -364,3 +364,48 @@ func lookingAtATiltedScreenFindsThePixelThere(curved: Bool) throws {
     #expect(elevation < 1.2)
     #expect(elevation > 0.5)
 }
+
+@Test func aFullyWrappedCanvasKeepsItsPixelsTheSameSizeNearTheTopAsInTheMiddle() {
+    let wrapped = RoomScreen(width: 3832, height: 4320, spherical: true).surface()
+    let step: Float = 0.01
+    for y in [Float(0), 0.6, 0.95] {
+        for x in [Float(0), 0.8] {
+            // A pixel's width along its row, and its height square to it:
+            // off the middle column the columns fan out, so pixels there
+            // lean a little but keep their size.
+            func size(at x: Float, _ y: Float) -> (width: Float, height: Float) {
+                let here = wrapped.point(at: SIMD2(x, y))
+                let across = wrapped.point(at: SIMD2(x + step, y)) - here
+                let down = wrapped.point(at: SIMD2(x, y + step)) - here
+                let square = down - dot(down, normalize(across)) * normalize(across)
+                return (simd_length(across) / simd_length(here), simd_length(square) / simd_length(here))
+            }
+            let (here, middle) = (size(at: x, y), size(at: 0, 0))
+            #expect(abs(here.width / middle.width - 1) < 0.01, "x \(x) y \(y)")
+            #expect(abs(here.height / middle.height - 1) < 0.01, "x \(x) y \(y)")
+        }
+    }
+}
+
+@Test func unwrappingTheCanvasAllTheWayGivesTheCurvedOneRoundTheViewer() {
+    var screen = RoomScreen(width: 5752, height: 2160, curved: true)
+    let curved = screen.surface()
+    screen.spherical = true
+    screen.verticalWrap = 0
+    let unwrapped = screen.surface()
+    for position in [SIMD2<Float>(0, 0), SIMD2(0.9, 1), SIMD2(-0.5, -1)] {
+        #expect(simd_distance(curved.point(at: position), unwrapped.point(at: position)) < 1e-4, "\(position)")
+    }
+}
+
+@Test func lookingAtAPixelOfAPartlyWrappedCanvasFindsThatPixel() throws {
+    for wrap in [Float(0.3), 0.7, 1] {
+        var screen = RoomScreen(width: 5752, height: 2160, spherical: true, verticalWrap: wrap)
+        screen.placement = ScreenPlacement(direction: SIMD3(-0.2, 0.3, -1), tilt: -0.1)
+        for pixel in [SIMD2<Float>(2876, 1080), SIMD2(50, 60), SIMD2(5700, 2100), SIMD2(1000, 1900)] {
+            let point = screen.roomPoint(ofPixel: pixel)
+            let found = try #require(gazeTarget(normalize(point), on: screen), "wrap \(wrap) pixel \(pixel)")
+            #expect(simd_distance(found, pixel) < 1, "wrap \(wrap) pixel \(pixel)")
+        }
+    }
+}

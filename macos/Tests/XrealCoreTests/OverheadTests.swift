@@ -136,3 +136,36 @@ private func elevation(_ point: SIMD3<Float>) -> Float {
         #expect(abs(simd_length(bottom) - 1) < 1e-4, "x \(x)")
     }
 }
+
+@Test func everyPixelOfTheRowAboveFacesTheViewerWhateverTheCanvasShape() throws {
+    let shapes = [
+        RoomScreen(width: 5752, height: 2160), RoomScreen(width: 5752, height: 2160, curved: true),
+        RoomScreen(width: 5752, height: 2160, spherical: true),
+        RoomScreen(width: 5752, height: 2160, spherical: true, verticalWrap: 0.4),
+    ]
+    for (index, shape) in shapes.enumerated() {
+        var screen = shape
+        screen.placement = ScreenPlacement(direction: SIMD3(0.2, 0.1, -1), distance: 1.3, tilt: 0.1)
+        let layout = overheadLayout(canvas: screen, dashboard: SIMD2(2400, 172), pinned: SIMD2(900, 700))
+        let row = overheadPanels(canvas: screen, layout: layout)
+        let turn = screen.placement.orientation.inverse
+        let seen = { (point: SIMD3<Float>) in elevation(turn.act(point)) }
+        for rect in [try #require(row.dashboard), try #require(row.pinned)] {
+            for x in [rect.left, (rect.left + rect.right) / 2, rect.right] {
+                for y in [rect.bottom, (rect.bottom + rect.top) / 2, rect.top] {
+                    let point = row.surface.point(at: SIMD2(x, y))
+                    let across = row.surface.point(at: SIMD2(x + 0.001, y)) - row.surface.point(at: SIMD2(x - 0.001, y))
+                    let upward = row.surface.point(at: SIMD2(x, y + 0.001)) - row.surface.point(at: SIMD2(x, y - 0.001))
+                    #expect(abs(simd_length(point) - 1.3) < 1e-3, "shape \(index) x \(x) y \(y)")
+                    #expect(abs(dot(normalize(across), normalize(point))) < 1e-2, "shape \(index) x \(x) y \(y)")
+                    #expect(abs(dot(normalize(upward), normalize(point))) < 1e-2, "shape \(index) x \(x) y \(y)")
+                }
+            }
+            // Clear of the canvas below, all along.
+            for x in [rect.left, 0, rect.right] where x >= -1 && x <= 1 {
+                #expect(seen(row.surface.point(at: SIMD2(x, rect.bottom))) > seen(screen.surface().point(at: SIMD2(x, 1))),
+                    "shape \(index) x \(x)")
+            }
+        }
+    }
+}
