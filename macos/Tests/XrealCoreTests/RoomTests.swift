@@ -221,6 +221,17 @@ func lookingAtAPointOnAScreenCurvedLikeAMonitorFindsThatPixel(radius: Float) thr
     #expect(simd_distance(simd_normalize(middle), placement.direction) < 1e-4)
 }
 
+@Test func zoomingOutBringsAPointBesideTheViewIntoSight() {
+    let tanHalf = tan(horizontalFov * 0.5)
+    let room = RoomView(headRotation: matrix_identity_float3x3, tanHalfFov: SIMD2(tanHalf, tanHalf * 9 / 16), panels: [])
+    let beside = SIMD3<Float>(sin(0.7), 0, -cos(0.7))
+    #expect(!room.shows(beside, scale: 1, margin: 0.9))
+    #expect(room.shows(beside, scale: 0.3, margin: 0.9))
+    // Behind the viewer no zoom helps.
+    #expect(room.isAhead(beside))
+    #expect(!room.isAhead(SIMD3(0, 0, 1)))
+}
+
 @Test func aGentlerCurveBendsTheEdgesLess() throws {
     let even = canvas.surface(curveRadius: 1)
     let gentle = canvas.surface(curveRadius: 2.5)

@@ -14,15 +14,8 @@ private let answerTimeout: Float = 0.5  // s
         AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": prompt] as CFDictionary)
     }
 
-    /// Set on the system-wide element, the timeout covers every element
-    /// this app asks, windows included, not just the apps.
-    private static let timeoutSet: Void = {
-        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), answerTimeout)
-    }()
-
     /// The focused window of the app in front.
     static func focusedWindow() -> AXUIElement? {
-        _ = timeoutSet
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
         let element = AXUIElementCreateApplication(app.processIdentifier)
         return attribute(kAXFocusedWindowAttribute, of: element).map { $0 as! AXUIElement }
@@ -31,12 +24,12 @@ private let answerTimeout: Float = 0.5  // s
     /// Every standard window of the apps in the Dock, apart from this app's,
     /// with its app's bundle identifier.
     static func allWindows() -> [(window: AXUIElement, bundleID: String?)] {
-        _ = timeoutSet
         let own = ProcessInfo.processInfo.processIdentifier
         return NSWorkspace.shared.runningApplications
             .filter { $0.activationPolicy == .regular && $0.processIdentifier != own }
             .flatMap { app -> [(window: AXUIElement, bundleID: String?)] in
                 let element = AXUIElementCreateApplication(app.processIdentifier)
+                AXUIElementSetMessagingTimeout(element, answerTimeout)
                 let windows = attribute(kAXWindowsAttribute, of: element) as? [AXUIElement] ?? []
                 return windows.map { ($0, app.bundleIdentifier) }
             }

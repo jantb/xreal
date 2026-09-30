@@ -75,21 +75,15 @@ final class Dashboard: @unchecked Sendable {
         self.device = device
     }
 
-    /// Looks at the Mac again and, when `redraw`, draws what it saw; shows
-    /// nothing when `glasses` is nil. Not redrawn, the histories still
-    /// fill, and the dashboard as last drawn stays up.
-    func update(glasses: GlassesReadings?, redraw: Bool = true) {
+    /// Looks at the Mac again and redraws, or shows nothing when `glasses`
+    /// is nil.
+    func update(glasses: GlassesReadings?) {
         guard let glasses else {
             latest.publish(nil)
             return
         }
         guard busy.withLock({ busy in defer { busy = true }; return !busy }) else { return }
         queue.async { [self] in
-            defer { busy.withLock { $0 = false } }
-            guard redraw else {
-                _ = sample(glasses: glasses)
-                return
-            }
             let started = monotonicNow()
             let drawn = draw(glasses: glasses, now: .now)
             let frame = drawn.flatMap { upload($0.bitmap, width: $0.width, height: $0.height) }
@@ -98,6 +92,7 @@ final class Dashboard: @unchecked Sendable {
                 timingLog.notice("Dashboard update took \(String(format: "%.1f", took * 1000), privacy: .public) ms")
             }
             latest.publish(frame)
+            busy.withLock { $0 = false }
         }
     }
 
@@ -149,16 +144,11 @@ final class Dashboard: @unchecked Sendable {
         queue.sync {}
     }
 
-    /// Looks at the Mac, and adds to the histories.
-    private func sample(glasses: GlassesReadings) -> SystemSample {
+    private func draw(glasses: GlassesReadings, now: Date) -> (bitmap: Data, width: Int, height: Int)? {
+        let sample = monitor.sample(now: monotonicNow())
         if let latency = glasses.latency {
             latencyHistory.append(Float(latency * 1000))
         }
-        return monitor.sample(now: monotonicNow())
-    }
-
-    private func draw(glasses: GlassesReadings, now: Date) -> (bitmap: Data, width: Int, height: Int)? {
-        let sample = sample(glasses: glasses)
         let tiles = self.tiles(sample: sample, glasses: glasses, now: now)
         let size = CGSize(
             width: CGFloat(tiles.count) * tileSize.width + CGFloat(max(tiles.count - 1, 0)) * tileSpacing,

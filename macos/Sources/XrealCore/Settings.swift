@@ -1,14 +1,10 @@
 import Foundation
 
-/// The range of the viewing distance, in metres: how far away the canvas
-/// at distance 1 is.
-public let minViewingDistance: Float = 0.5
-public let maxViewingDistance: Float = 20
+/// The most the prediction lead can be lengthened, in milliseconds.
+public let maxLatencyTrimMs: Float = 40
 
-/// The range of the curve's radius, as multiples of the canvas's distance:
-/// the smaller the radius, the stronger the curve.
-public let minCurveRadius: Float = 0.5
-public let maxCurveRadius: Float = 5
+/// The flattest curve kept, as a multiple of a screen's distance.
+private let maxCurveRadius: Float = 10
 
 /// How often macOS can draw the canvas, in frames per second. The glasses
 /// still show every one of their own refreshes; this is how often what is on
@@ -37,9 +33,16 @@ public struct PinnedWindow: Equatable, Hashable, Sendable {
     }
 }
 
-/// User-tunable settings, persisted between runs as `key=value` lines.
-/// Keys no longer used are ignored.
+/// User-tunable settings, persisted between runs as `key=value` lines. Files
+/// written by the old Rust version of the app still load.
 public struct Settings: Equatable, Sendable {
+    public var prediction = true
+    /// Milliseconds added to how far ahead the head pose is predicted, to
+    /// make up for frames reaching the glasses later than assumed.
+    public var latencyTrimMs: Float = 0
+    /// Whether the diagnostics are expanded in the controls window. Saved as
+    /// `overlay_visible`, from when they were drawn over the picture.
+    public var diagnosticsVisible = true
     /// Gyro bias at the tracking's reference temperature, rad/s.
     public var gyroBias: SIMD3<Float> = .zero
     /// How the gyro bias changes per °C, rad/s, as learned so far.
@@ -50,10 +53,15 @@ public struct Settings: Equatable, Sendable {
     public var canvas = RoomScreen(width: 5752, height: 2160, curved: true)
     /// The canvas tilts with the head so it stays level.
     public var followRoll = true
+    /// Zoom out while the mouse moves outside the view.
+    public var followCursor = true
     /// The radius the canvas bends with when curved, as a multiple of its
     /// distance: 1 surrounds the viewer evenly, less bends it more, more
     /// bends it less.
     public var curveRadius: Float = 1
+    /// Draws each eye through its lens's calibrated distortion, so straight
+    /// edges stay straight to the corners of the view.
+    public var lensCorrection = true
     /// How many metres a room unit is: the canvas at distance 1 is this far
     /// away. Nearer shows more depth between its parts. It starts where the
     /// glasses' optics focus.
@@ -61,6 +69,9 @@ public struct Settings: Equatable, Sendable {
     /// Fades the last few pixels of the canvas and what hangs above it, so
     /// they end softly against the room.
     public var softEdges = true
+    /// Holds the Mac's own screen at 60 Hz while the glasses are in use, as
+    /// its ProMotion rate makes the glasses drop frames.
+    public var steadyLaptopScreen = true
     /// Switches the Mac's own screen off while the glasses are in use: with
     /// it on, the glasses drop frames every few seconds.
     public var laptopScreenOff = true
@@ -68,8 +79,14 @@ public struct Settings: Equatable, Sendable {
     public var ambientLight = false
     /// How often macOS draws the canvas; one of `canvasRefreshRates`.
     public var canvasRefreshRate = 90
+    /// Takes the head pose as late before each frame as the frame's work
+    /// allows, so it has less far to predict.
+    public var latePoseSampling = true
     /// Sharpens the canvas where it shows about one pixel per glasses pixel.
     public var sharpFiltering = true
+    /// Draws the mouse pointer where the mouse is as each frame is drawn,
+    /// instead of where it was when the canvas was captured.
+    public var livePointer = true
     /// Shows the dashboard above the canvas. Saved as `status_strip`, from
     /// when it was a line of text.
     public var statusStrip = true
@@ -100,6 +117,9 @@ public struct Settings: Equatable, Sendable {
     public static func parse(_ text: String) -> Settings {
         var settings = Settings()
         var canvas: RoomScreen?
+        // Written when there were several screens: the first one used with
+        // the glasses alone was the canvas.
+        var glassesOnlyScreen: RoomScreen?
         var verticalWrap: Float?
         var evenSize: Bool?
         for line in text.split(whereSeparator: \.isNewline) {
@@ -107,30 +127,42 @@ public struct Settings: Equatable, Sendable {
             let key = line[..<separator].trimmingCharacters(in: .whitespaces)
             let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespaces)
             switch key {
+            case "prediction": parse(value, into: &settings.prediction)
+            case "overlay_visible": parse(value, into: &settings.diagnosticsVisible)
             case "gyro_bias_x": parseFinite(value, into: &settings.gyroBias.x)
             case "gyro_bias_y": parseFinite(value, into: &settings.gyroBias.y)
             case "gyro_bias_z": parseFinite(value, into: &settings.gyroBias.z)
             case "gyro_bias_slope_x": parseFinite(value, into: &settings.gyroBiasSlope.x)
             case "gyro_bias_slope_y": parseFinite(value, into: &settings.gyroBiasSlope.y)
             case "gyro_bias_slope_z": parseFinite(value, into: &settings.gyroBiasSlope.z)
+            case "latency_trim_ms":
+                if let trim = Float(value), trim.isFinite {
+                    settings.latencyTrimMs = min(max(trim, 0), maxLatencyTrimMs)
+                }
             case "canvas": canvas = canvas ?? parseScreen(value)
+            case "glasses_only_screen": glassesOnlyScreen = glassesOnlyScreen ?? parseScreen(value)
             case "follow_roll": parse(value, into: &settings.followRoll)
+            case "follow_cursor": parse(value, into: &settings.followCursor)
+            case "lens_correction": parse(value, into: &settings.lensCorrection)
             case "metres_per_room_unit":
                 if let metres = Float(value), metres.isFinite, metres > 0 {
-                    settings.metresPerRoomUnit = min(max(metres, minViewingDistance), maxViewingDistance)
+                    settings.metresPerRoomUnit = min(max(metres, 0.25), 20)
                 }
             case "canvas_refresh_rate":
                 if let rate = Int(value), canvasRefreshRates.contains(rate) {
                     settings.canvasRefreshRate = rate
                 }
+            case "late_pose_sampling": parse(value, into: &settings.latePoseSampling)
             case "sharp_filtering": parse(value, into: &settings.sharpFiltering)
             case "soft_edges": parse(value, into: &settings.softEdges)
+            case "steady_laptop_screen": parse(value, into: &settings.steadyLaptopScreen)
             case "laptop_screen_off": parse(value, into: &settings.laptopScreenOff)
             case "ambient_light": parse(value, into: &settings.ambientLight)
             case "even_text_size":
                 var even = true
                 parse(value, into: &even)
                 evenSize = even
+            case "live_pointer": parse(value, into: &settings.livePointer)
             case "status_strip": parse(value, into: &settings.statusStrip)
             case "pinned_window":
                 // `BUNDLE_ID|TITLE`; a title may hold anything but a line break.
@@ -142,14 +174,14 @@ public struct Settings: Equatable, Sendable {
                 if let wrap = Float(value), wrap.isFinite {
                     verticalWrap = min(max(wrap, 0), 1)
                 }
-            case "curve_radius":
+            case "curve_radius", "sphere_curve":
                 if let radius = Float(value), radius.isFinite, radius > 0 {
-                    settings.curveRadius = min(max(radius, minCurveRadius), maxCurveRadius)
+                    settings.curveRadius = min(radius, maxCurveRadius)
                 }
             default: break
             }
         }
-        if let screen = canvas {
+        if let screen = canvas ?? glassesOnlyScreen {
             settings.canvas = screen
         }
         if let verticalWrap {
@@ -163,6 +195,9 @@ public struct Settings: Equatable, Sendable {
 
     public func serialize() -> String {
         let lines = [
+            "prediction=\(prediction)",
+            "overlay_visible=\(diagnosticsVisible)",
+            "latency_trim_ms=\(latencyTrimMs)",
             "gyro_bias_x=\(gyroBias.x)",
             "gyro_bias_y=\(gyroBias.y)",
             "gyro_bias_z=\(gyroBias.z)",
@@ -173,13 +208,18 @@ public struct Settings: Equatable, Sendable {
             "vertical_wrap=\(canvas.verticalWrap)",
             "even_text_size=\(canvas.evenSize)",
             "follow_roll=\(followRoll)",
+            "follow_cursor=\(followCursor)",
             "curve_radius=\(curveRadius)",
+            "lens_correction=\(lensCorrection)",
             "metres_per_room_unit=\(metresPerRoomUnit)",
             "canvas_refresh_rate=\(canvasRefreshRate)",
+            "late_pose_sampling=\(latePoseSampling)",
             "sharp_filtering=\(sharpFiltering)",
             "soft_edges=\(softEdges)",
+            "steady_laptop_screen=\(steadyLaptopScreen)",
             "laptop_screen_off=\(laptopScreenOff)",
             "ambient_light=\(ambientLight)",
+            "live_pointer=\(livePointer)",
             "status_strip=\(statusStrip)",
         ] + (pinnedWindow.map { ["pinned_window=\($0.bundleID)|\($0.title.filter { !$0.isNewline })"] } ?? [])
         return lines.map { $0 + "\n" }.joined()

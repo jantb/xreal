@@ -64,7 +64,7 @@ private func drawWhiteCanvas(softEdges: Bool, ambientLight: Bool = false) async 
     let now = monotonicNow()
     let room = try #require(
         state.advance(
-            now: now, presentingAt: now + 1 / 90, snapshot: TrackingSnapshot(gyroBias: .zero),
+            now: now, dt: 1 / 90, presentingAt: now + 1 / 90, snapshot: TrackingSnapshot(gyroBias: .zero),
             captureGeneration: 0, newFrame: true, frameSizes: [(1920, 1080)], output: (3840, 1080), cursor: nil
         ).room)
     let images = PanelImages(canvas: [try whiteImage(renderer.device, width: 1920, height: 1080)])
@@ -126,10 +126,11 @@ func identicalEyesSeeIdenticalPixelsWhenPanningAcrossAWideCanvas(yaw: Float) asy
     let drawable = try #require(layer.nextDrawable())
     var settings = Settings()
     settings.canvas = RoomScreen(width: 5752, height: 2160)
+    settings.prediction = false
     var state = ViewerState(settings: settings)
     let now = monotonicNow()
     var room = try #require(state.advance(
-        now: now, presentingAt: now + 1 / 90, snapshot: TrackingSnapshot(gyroBias: .zero),
+        now: now, dt: 1 / 90, presentingAt: now + 1 / 90, snapshot: TrackingSnapshot(gyroBias: .zero),
         captureGeneration: 0, newFrame: true, frameSizes: [(5752, 2160)], output: (3840, 1080), cursor: nil
     ).room)
     // Remove intentional stereo disparity. The two views must now agree,
@@ -181,7 +182,7 @@ func identicalEyesSeeIdenticalPixelsWhenPanningAcrossAWideCanvas(yaw: Float) asy
         layer.drawableSize = CGSize(width: 3840, height: 1080)
         let drawable = try #require(layer.nextDrawable())
         var state = ViewerState(settings: Settings())
-        var room = try #require(state.advance(now: 100, presentingAt: 100.01,
+        var room = try #require(state.advance(now: 100, dt: 1 / 90, presentingAt: 100.01,
             snapshot: TrackingSnapshot(gyroBias: .zero), captureGeneration: 0, newFrame: true,
             frameSizes: [(64, 1)], output: (3840, 1080), cursor: nil).room)
         let eye = EyeOptics(focal: SIMD2(repeating: 960), center: SIMD2(960.5, 540.5), size: SIMD2(1920, 1080),

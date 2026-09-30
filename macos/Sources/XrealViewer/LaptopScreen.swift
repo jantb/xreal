@@ -1,15 +1,13 @@
 import AppKit
 import Darwin
-import IOKit
 import XrealCore
 
+// The rate the Mac's own screen had before it was held at 60 Hz, kept on
+// disk so it can be given back even after a crash, at the next start.
+private let heldRateKey = "laptopScreenRateBeforeHolding"
 // The Mac's own screen's ID while the viewer has it switched off, kept on
 // disk so the watchdog, or the next start, can switch it back on.
 private let turnedOffKey = "laptopScreenTurnedOff"
-// How often switching the screen back on is tried, and how long each try
-// waits for it to come on.
-private let turnOnAttempts = 3
-private let turnOnWait = 2.0  // seconds
 
 /// macOS's private switch for a display, which display utilities use: there
 /// is no public way to turn one off. Nil if macOS no longer has it.
@@ -22,154 +20,67 @@ private let configureDisplayEnabled:
             symbol, to: (@convention(c) (CGDisplayConfigRef?, CGDirectDisplayID, Bool) -> CGError).self)
     }()
 
-/// Switches the Mac's own screen off while the glasses are in use, and back
-/// on after. Alongside the canvas's virtual display, the Mac's screen makes
-/// the glasses drop frames every few seconds; switched off, not at all.
+/// Switches the Mac's own screen off while the glasses are in use, or, if
+/// that is not wanted or not possible, holds it at a steady 60 Hz, and gives
+/// it back as it was after. Alongside the canvas's virtual display, the
+/// Mac's screen makes the glasses drop frames every few seconds: at 60 Hz
+/// about half as often, switched off not at all.
 @MainActor final class LaptopScreen {
     private let defaults = UserDefaults.standard
-    /// Set once the viewer quits: nothing switches the screen off after
-    /// that, not even a display change arriving meanwhile.
+    /// Set once the viewer quits: nothing holds the screen after that, not
+    /// even a display change arriving while its rate is being given back.
     private var released = false
-    /// Checks that the screen really came back on, and asks again if not.
-    private var turningOn: Task<Void, Never>?
-    /// Set once switching it back on did not take, so the display changes
-    /// each try causes do not start the tries over and over. Cleared when
-    /// the glasses come back.
-    private var gaveUp = false
-    /// Set once the screen, found off where the canvas belongs, was switched
-    /// on to be moved out of the way, so that happens once each time the
-    /// glasses are put on.
-    private var straightened = false
 
-    /// Gives the screen back for good, as the viewer quits. The screen is
-    /// asked to come back on once; the watchdog makes sure it did.
+    /// Gives the screen back as it was for good, as the viewer quits.
     func release() {
         released = true
-        turningOn?.cancel()
-        turningOn = nil
-        guard let display = turnedOff, !isOn(display), CGDisplayIsOnline(display) != 0 else { return }
-        _ = setEnabled(true, display)
+        turnBackOn()
+        hold(steady: false)
     }
 
-    /// From the watchdog once the viewer has gone: brings the screen back
-    /// on, waiting for it and asking again until it is.
+    /// Switches the Mac's screen off when `off`, and otherwise switches it
+    /// back on and holds it at 60 Hz when `steady`. Call again when displays
+    /// change.
+    func update(off: Bool, steady: Bool) {
+        if off, !released, configureDisplayEnabled != nil {
+            guard defaults.object(forKey: turnedOffKey) == nil,
+                let display = Displays.active().first(where: { CGDisplayIsBuiltin($0) != 0 })
+            else { return }
+            // Back in its own mode first, so that is how it comes back on.
+            hold(steady: false)
+            // Noted before it goes, so a crash in between still brings it back.
+            defaults.set(Int(display), forKey: turnedOffKey)
+            if setEnabled(false, display) {
+                eprint("Switched the laptop screen off")
+            } else {
+                defaults.removeObject(forKey: turnedOffKey)
+                hold(steady: steady)
+            }
+            return
+        }
+        turnBackOn()
+        hold(steady: steady)
+    }
+
+    /// Switches the Mac's screen back on, if the viewer switched it off.
+    func turnBackOn() {
+        guard let display = defaults.object(forKey: turnedOffKey) as? Int else { return }
+        if setEnabled(true, CGDirectDisplayID(display)) {
+            defaults.removeObject(forKey: turnedOffKey)
+            eprint("Switched the laptop screen back on")
+        }
+    }
+
+    /// Everything as it was before the viewer, for the watchdog once the
+    /// viewer has gone: the screen on, then its own rate once it is back.
     func recover() {
         released = true
-        for _ in 0..<turnOnAttempts {
-            guard let display = turnedOff, !isOn(display), CGDisplayIsOnline(display) != 0 else { return }
-            _ = setEnabled(true, display)
-            let deadline = monotonicNow() + turnOnWait
-            while monotonicNow() < deadline, !isOn(display) {
-                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
-            }
+        turnBackOn()
+        let deadline = monotonicNow() + 3
+        while monotonicNow() < deadline, !Displays.active().contains(where: { CGDisplayIsBuiltin($0) != 0 }) {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
         }
-    }
-
-    /// Switches the Mac's screen off when `off`, and otherwise back on, if
-    /// the viewer switched it off. Call again when displays change.
-    func update(off: Bool) {
-        guard off, !released, configureDisplayEnabled != nil else {
-            turnBackOn()
-            return
-        }
-        // The glasses came back while the screen was coming on.
-        turningOn?.cancel()
-        turningOn = nil
-        gaveUp = false
-        if !straightened, let display = Self.builtInSwitchedOff(), CGDisplayIsMain(display) != 0 {
-            // Switched off while it was the main display, it keeps the
-            // place the canvas needs, and the menu bar and Dock with it,
-            // where nothing shows them. On again for a moment, the canvas
-            // is arranged above it, and it goes off after.
-            straightened = true
-            if setEnabled(true, display) {
-                defaults.removeObject(forKey: turnedOffKey)
-                eprint("The laptop screen was off in the canvas's place; switching it on to move it")
-            }
-            return
-        }
-        guard defaults.object(forKey: turnedOffKey) == nil else { return }
-        if let display = Self.builtInSwitchedOff() {
-            // Left off, as by a switch back on that never took: taken as
-            // the viewer's, so it comes back on after.
-            defaults.set(Int(display), forKey: turnedOffKey)
-            eprint("The laptop screen was already off")
-            return
-        }
-        guard let display = Displays.active().first(where: { CGDisplayIsBuiltin($0) != 0 }) else { return }
-        // Noted before it goes, so a crash in between still brings it back.
-        defaults.set(Int(display), forKey: turnedOffKey)
-        if setEnabled(false, display) {
-            eprint("Switched the laptop screen off")
-        } else {
-            defaults.removeObject(forKey: turnedOffKey)
-        }
-    }
-
-    /// Switches the Mac's screen back on, if the viewer switched it off. It
-    /// is only forgotten once it is really on: a switch reported done can
-    /// still not take, as when the glasses go at the same moment.
-    private func turnBackOn() {
-        straightened = false
-        guard turningOn == nil, !gaveUp else { return }
-        if turnedOff == nil, let display = Self.builtInSwitchedOff() {
-            // Left off with nothing noted, as by an earlier switch back on
-            // that never took: without it there may be no screen at all.
-            defaults.set(Int(display), forKey: turnedOffKey)
-        }
-        guard let display = turnedOff else { return }
-        turningOn = Task { [weak self] in
-            for _ in 0..<turnOnAttempts {
-                guard let self else { return }
-                // With the lid closed it cannot come on; it is tried again
-                // when displays change.
-                guard !isOn(display), CGDisplayIsOnline(display) != 0 else { break }
-                _ = setEnabled(true, display)
-                let deadline = monotonicNow() + turnOnWait
-                while monotonicNow() < deadline, !isOn(display) {
-                    // Cancelled when the glasses come back or the viewer
-                    // quits, which take over from here.
-                    do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
-                }
-            }
-            guard let self, !Task.isCancelled else { return }
-            turningOn = nil
-            if turnedOff == nil {
-                eprint("Switched the laptop screen back on")
-            } else if CGDisplayIsOnline(display) != 0 {
-                gaveUp = true
-                eprint("The laptop screen did not come back on")
-            }
-        }
-    }
-
-    /// The screen the viewer switched off, until it is on again.
-    private var turnedOff: CGDirectDisplayID? {
-        (defaults.object(forKey: turnedOffKey) as? Int).map { CGDirectDisplayID($0) }
-    }
-
-    /// Whether `display` is on, forgetting it was switched off once it is.
-    private func isOn(_ display: CGDirectDisplayID) -> Bool {
-        guard CGDisplayIsActive(display) != 0 else { return false }
-        defaults.removeObject(forKey: turnedOffKey)
-        return true
-    }
-
-    /// The built-in screen, if it is there with the lid open but switched
-    /// off, not merely asleep or mirroring another.
-    private static func builtInSwitchedOff() -> CGDirectDisplayID? {
-        guard !lidClosed() else { return nil }
-        return Displays.online().first {
-            CGDisplayIsBuiltin($0) != 0 && CGDisplayIsActive($0) == 0 && CGDisplayIsInMirrorSet($0) == 0
-        }
-    }
-
-    private static func lidClosed() -> Bool {
-        let root = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
-        guard root != 0 else { return false }
-        defer { IOObjectRelease(root) }
-        let state = IORegistryEntryCreateCFProperty(root, "AppleClamshellState" as CFString, kCFAllocatorDefault, 0)
-        return (state?.takeRetainedValue() as? Bool) ?? false
+        hold(steady: false)
     }
 
     private func setEnabled(_ enabled: Bool, _ display: CGDirectDisplayID) -> Bool {
@@ -184,6 +95,66 @@ private let configureDisplayEnabled:
         let result = CGCompleteDisplayConfiguration(config, .forSession)
         if result != .success {
             eprint("Could not switch the laptop screen \(enabled ? "on" : "off"): \(result.rawValue)")
+        }
+        return result == .success
+    }
+
+    /// Holds the built-in screen at 60 Hz when `steady`, or gives it back
+    /// its own rate. Does nothing without a built-in screen in use, as with
+    /// the lid closed; call again when displays change.
+    func hold(steady: Bool) {
+        guard let display = Displays.active().first(where: { CGDisplayIsBuiltin($0) != 0 }),
+            let current = CGDisplayCopyDisplayMode(display)
+        else { return }
+        let heldFrom = defaults.object(forKey: heldRateKey) as? Double
+        if steady && !released {
+            guard abs(current.refreshRate - 60) > 0.5, let steadyMode = Self.mode(like: current, at: 60, on: display)
+            else { return }
+            if heldFrom == nil {
+                defaults.set(current.refreshRate, forKey: heldRateKey)
+            }
+            if apply(steadyMode, to: display) {
+                eprint("Holding the laptop screen at 60 Hz")
+            }
+        } else if !steady || released, let heldFrom {
+            // Its own mode at the same size, wherever it went meanwhile, as
+            // when the lid was closed and opened.
+            guard let own = Self.mode(like: current, at: heldFrom, on: display), apply(own, to: display) else { return }
+            // The change takes a moment, and is lost if the viewer quits
+            // before it lands: wait for it, but not for long.
+            let deadline = monotonicNow() + 1.5
+            while monotonicNow() < deadline,
+                abs((CGDisplayCopyDisplayMode(display)?.refreshRate ?? heldFrom) - heldFrom) > 0.5
+            {
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+            }
+            if abs((CGDisplayCopyDisplayMode(display)?.refreshRate ?? 0) - heldFrom) <= 0.5 {
+                defaults.removeObject(forKey: heldRateKey)
+                eprint("Gave the laptop screen back its own refresh rate")
+            } else {
+                eprint("The laptop screen did not take back its own refresh rate yet")
+            }
+        }
+    }
+
+    /// The mode of `display` with `current`'s size and density at `rate`.
+    private static func mode(like current: CGDisplayMode, at rate: Double, on display: CGDirectDisplayID) -> CGDisplayMode? {
+        let options = [kCGDisplayShowDuplicateLowResolutionModes: true] as CFDictionary
+        let modes = CGDisplayCopyAllDisplayModes(display, options) as? [CGDisplayMode] ?? []
+        return modes.first {
+            $0.width == current.width && $0.height == current.height && $0.pixelWidth == current.pixelWidth
+                && $0.pixelHeight == current.pixelHeight && abs($0.refreshRate - rate) < 0.01
+        }
+    }
+
+    /// Sets `mode` on `display` until logout, at the latest.
+    private func apply(_ mode: CGDisplayMode, to display: CGDirectDisplayID) -> Bool {
+        var config: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&config) == .success, let config else { return false }
+        CGConfigureDisplayWithDisplayMode(config, display, mode, nil)
+        let result = CGCompleteDisplayConfiguration(config, .forSession)
+        if result != .success {
+            eprint("Could not change the laptop screen's refresh rate: \(result.rawValue)")
         }
         return result == .success
     }

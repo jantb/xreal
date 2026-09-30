@@ -68,9 +68,6 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     @MainActor private var configuration: SCStreamConfiguration?
     @MainActor private var updatingConfiguration = false
     @MainActor private(set) var fps = 0
-    /// Called when the capture stops by itself, as when macOS ends it, so
-    /// it can be started again.
-    @MainActor var onStop: (() -> Void)?
     /// The captured window's size in points and density, and the longest
     /// side allowed, while capturing a window.
     @MainActor private var windowCapture: (size: CGSize, scale: CGFloat, maxPixels: CGFloat)?
@@ -94,13 +91,13 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     /// part of it.
     @MainActor func start(
         displayID: CGDirectDisplayID, in content: SCShareableContent, pixelSize: (width: Int, height: Int),
-        sourceRect: CGRect? = nil, fps: Int, excludedWindowID: CGWindowID
+        sourceRect: CGRect? = nil, fps: Int, showsCursor: Bool, excludedWindowID: CGWindowID
     ) async throws {
         guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
             throw CaptureError.displayNotShareable
         }
         let viewerWindow = content.windows.filter { $0.windowID == excludedWindowID }
-        let configuration = Self.configuration(pixelSize: pixelSize, fps: fps)
+        let configuration = Self.configuration(pixelSize: pixelSize, fps: fps, showsCursor: showsCursor)
         if let sourceRect {
             configuration.sourceRect = sourceRect
         }
@@ -114,7 +111,7 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let scale = Self.pixelScale(of: filter)
         let pixels = Self.pixelSize(of: window.frame.size, scale: scale, maxPixels: maxPixels)
-        let configuration = Self.configuration(pixelSize: pixels, fps: fps)
+        let configuration = Self.configuration(pixelSize: pixels, fps: fps, showsCursor: false)
         // Shown at the window's size in points, however many pixels it has.
         pixelsPerPoint.withLock { $0 = Float(pixels.width) / Float(max(window.frame.width, 1)) }
         configuration.ignoreShadowsSingleWindow = true
@@ -159,7 +156,7 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         return (max(Int(size.width * scale * fit), 1), max(Int(size.height * scale * fit), 1))
     }
 
-    private static func configuration(pixelSize: (width: Int, height: Int), fps: Int)
+    private static func configuration(pixelSize: (width: Int, height: Int), fps: Int, showsCursor: Bool)
         -> SCStreamConfiguration
     {
         let configuration = SCStreamConfiguration()
@@ -169,8 +166,7 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.colorSpaceName = CGColorSpace.sRGB
         configuration.queueDepth = 4
-        // The pointer is drawn live over the captures instead.
-        configuration.showsCursor = false
+        configuration.showsCursor = showsCursor
         return configuration
     }
 
@@ -253,12 +249,5 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         eprint("Screen capture stopped: \(error.localizedDescription)")
-        let stopped = ObjectIdentifier(stream)
-        Task { @MainActor in
-            // Not one stopped on purpose, or replaced since.
-            guard self.stream.map(ObjectIdentifier.init) == stopped else { return }
-            await stop()
-            onStop?()
-        }
     }
 }
