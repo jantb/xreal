@@ -40,8 +40,9 @@ Global shortcuts (⌃⌥⌘ plus a key):
 | Key | Action |
 | --- | --- |
 | C | Recenter |
-| G (hold) | Carry the canvas while looking at it |
+| G (hold) | Bring the canvas in front of you and carry it with your head; tilt your head to tilt it |
 | = / - | Bring the canvas closer / push it away |
+| 0 | Reset zoom: the canvas back at its own distance, one pixel per glasses pixel |
 | ] / [ | Next canvas size up / down |
 | W | Move the focused window to where you look |
 | F | Fit the focused window to the zone you look at |
@@ -55,8 +56,9 @@ sphere. **Even Out Text Size** shares that shrinking out, a little
 larger in the middle and a little smaller at the edges. Edges are drawn
 smooth (four samples a pixel) and fade softly into the room (**Soft
 Edges**). **Viewing Distance** starts at, and snaps to, the 4 m where the
-glasses' optics focus, so the eyes aim and focus at the same distance. **Ambient Light** lights the room round the canvas in the
-colours of its edges, like a TV's backlight.
+glasses' optics focus, so the eyes aim and focus at the same distance. **Ambient Light** lights the room round the canvas with
+the light of what is on it near its edges, softer and from farther in the
+farther out it reaches, like a TV's backlight.
 
 Above the canvas, where you see it by looking up, hangs a row tilted to face
 you: a dashboard updated ten times a second (time and thermal state, CPU per

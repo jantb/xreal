@@ -22,6 +22,7 @@ private let shaderSource = """
         float4 lens;               // xy: where the lens lookup starts, z: its step, w: 1 to use it
         float4 lensGrid;           // xy: the lookup's columns and rows, zw: the eye's size in pixels
         float4 halo;               // the glow: xy the canvas's size in points, z how far it reaches, w how bright
+        float4 backing;            // x: 1 to hide the glow behind whatever the panel shows, faint parts too
     };
 
     struct PanelOut {
@@ -74,7 +75,10 @@ private let shaderSource = """
         // about linear in height, so the vertices of a strip suffice.
         float4 top = panel.viewProjection * float4(room, 1);
         float4 bottom = panel.scanEndViewProjection * float4(room, 1);
-        float row = top.w > 1e-4 ? 0.5 - 0.5 * top.y / top.w : 0;
+        // Held to the rows there are: nearly level with the eye, out to the
+        // side, top.y / top.w runs off to huge values, and the vertex would
+        // be flung across the view by any head motion.
+        float row = top.w > 1e-4 ? saturate(0.5 - 0.5 * top.y / top.w) : 0;
         out.position = mix(top, bottom, row);
         if (panel.lens.w > 0.5 && out.position.w > 1e-4) {
             // Drawn where the lens shows it: from the pixel it would be at
@@ -92,20 +96,47 @@ private let shaderSource = """
         return out;
     }
 
-    // The glow round the canvas: the colour of the canvas's nearest edge, as
-    // the small blurred copy of it has it, brightest at the edge and fading
-    // out over `halo.z` points. Light only, added to what is behind.
+    // The glow round the canvas: light thrown by what is on the canvas near
+    // its edge, from the small blurred copy of it. Farther out, the light
+    // comes from a wider patch farther in, as light spreads, so it softens
+    // and blends without copying shapes. Brightest at the edge, it fades out
+    // smoothly over `halo.z` points. Light only, added to what is behind.
     fragment float4 haloFragment(PanelOut in [[stage_in]],
                                  constant Panel &panel [[buffer(0)]],
-                                 texture2d<float> ambient [[texture(0)]],
-                                 sampler linear [[sampler(0)]]) {
+                                 texture2d<float> ambient [[texture(0)]]) {
+        constexpr sampler blurred(filter::linear, mip_filter::linear, address::clamp_to_edge);
         float2 inside = clamp(in.screenUV, 0.0, 1.0);
-        float reach = length((in.screenUV - inside) * panel.halo.xy) / panel.halo.z;
+        float2 past = (in.screenUV - inside) * panel.halo.xy;  // points
+        float away = length(past);
+        float reach = away / panel.halo.z;
         if (reach >= 1) {
             return float4(0);
         }
-        float fall = (1 - reach) * (1 - reach) * exp(-2 * reach);
-        return float4(ambient.sample(linear, inside).rgb * fall * panel.halo.w, 0);
+        // The patches the light comes from, in points: each as wide as its
+        // middle is far in from the nearest point of the edge. Even right
+        // at the edge, light comes from well inside, or a dark border
+        // would throw a shadow round the canvas.
+        float2 inward = away > 1e-3 ? -past / away : float2(0);
+        float texel = panel.halo.x / float(ambient.get_width());
+        float3 light = 0;
+        for (int wide = 0; wide < 2; wide++) {
+            float patch = (wide == 0 ? 120 : 300) + 0.8 * away;
+            float2 from = clamp(inside + inward * patch / panel.halo.xy, 0.0, 1.0);
+            light += 0.5 * ambient.sample(blurred, from, level(max(log2(patch / texel), 0.0))).rgb;
+        }
+        // A little more colourful than the canvas, as a glow reads paler.
+        float grey = dot(light, float3(0.2126, 0.7152, 0.0722));
+        light = max(mix(float3(grey), light, 1.25), 0.0);
+        float fall = exp(-2.5 * reach) * (1 - reach * reach) * (1 - reach * reach);
+        light *= fall * panel.halo.w;
+        // Dithered by up to a step either way of the 8-bit output, with
+        // triangular noise from two patterns, so the long dark gradient
+        // shows no bands.
+        float2 at = in.position.xy;
+        float noise = fract(52.9829189 * fract(dot(at, float2(0.06711056, 0.00583715))))
+            + fract(52.9829189 * fract(dot(at + float2(47, 17), float2(0.00583715, 0.06711056)))) - 1;
+        float3 encoded = pow(light, 1 / 2.2) + noise / 255;
+        return float4(pow(max(encoded, 0.0), 2.2), 0);
     }
 
     // The small blurred copy of the canvas the glow takes its colours from:
@@ -139,6 +170,35 @@ private let shaderSource = """
             }
         }
         return float4(sum / 64, 1);
+    }
+
+    // The arrow pointing back to the canvas while it is out of view:
+    // arrow[0].xy its middle in clip space, zw the way it points, in pixels
+    // with y up; arrow[1].xy half its length in clip space across and up.
+    struct ArrowOut {
+        float4 position [[position]];
+        float2 local;  // -1 to 1, pointing towards +x
+    };
+
+    vertex ArrowOut arrowVertex(uint id [[vertex_id]], constant float4 *arrow [[buffer(0)]]) {
+        float2 local = float2(id & 1, id >> 1) * 2 - 1;
+        float2 way = arrow[0].zw;
+        float2 across = float2(-way.y, way.x);
+        ArrowOut out;
+        out.position = float4(arrow[0].xy + (way * local.x + across * local.y) * arrow[1].xy, 0, 1);
+        out.local = local;
+        return out;
+    }
+
+    fragment float4 arrowFragment(ArrowOut in [[stage_in]]) {
+        float2 p = in.local;
+        // A head from x = 0 to its tip at x = 1, and a shaft behind it.
+        float head = max(abs(p.y) - (1 - p.x) * 0.9, -p.x);
+        float shaft = max(max(abs(p.y) - 0.3, p.x - 0.05), -0.9 - p.x);
+        float inside = min(head, shaft);
+        float coverage = saturate(0.5 - inside / max(fwidth(inside), 1e-5));
+        // Light blue, in linear light, like the canvas's outline.
+        return float4(0.1, 0.52, 1, 1) * 0.9 * coverage;
     }
 
     // Catmull-Rom from nine bilinear samples: sharper than one bilinear
@@ -202,23 +262,36 @@ private let shaderSource = """
         float2 size = float2(source.get_width(), source.get_height());
         float footprint = max(length(dx * size), length(dy * size));
         float blend = smoothstep(1.0, 1.25, footprint);
+        float4 color;
         if (blend <= 0) {
-            return fade * (panel.outline.z > 0.5 ? sampleSharp(source, linear, in.uv, size) : source.sample(linear, in.uv));
+            color = panel.outline.z > 0.5 ? sampleSharp(source, linear, in.uv, size) : source.sample(linear, in.uv);
+        } else {
+            float4 averaged = 0.25
+                * (source.sample(linear, in.uv + 0.25 * (dx + dy)) + source.sample(linear, in.uv + 0.25 * (dx - dy))
+                    + source.sample(linear, in.uv - 0.25 * (dx + dy)) + source.sample(linear, in.uv - 0.25 * (dx - dy)));
+            // Continuous across the magnification boundary: resizing or
+            // panning must not suddenly change the shape of thin text strokes.
+            float4 sharp = panel.outline.z > 0.5 ? sampleSharp(source, linear, in.uv, size) : source.sample(linear, in.uv);
+            color = blend >= 1 ? averaged : mix(sharp, averaged, blend);
         }
-        float4 averaged = 0.25
-            * (source.sample(linear, in.uv + 0.25 * (dx + dy)) + source.sample(linear, in.uv + 0.25 * (dx - dy))
-                + source.sample(linear, in.uv - 0.25 * (dx + dy)) + source.sample(linear, in.uv - 0.25 * (dx - dy)));
-        // Continuous across the magnification boundary: resizing or
-        // panning must not suddenly change the shape of thin text strokes.
-        if (blend >= 1) { return fade * averaged; }
-        float4 sharp = panel.outline.z > 0.5 ? sampleSharp(source, linear, in.uv, size) : source.sample(linear, in.uv);
-        return fade * mix(sharp, averaged, blend);
+        // Backed, whatever it shows covers what is behind, even a faint
+        // wash, showing black round it, which the glasses show as nothing;
+        // where it shows nothing at all, what is behind shows through.
+        if (panel.backing.x > 0.5) {
+            color.a = saturate(color.a * 20);
+        }
+        return fade * color;
     }
     """
 
 // The small blurred copy of the canvas the glow round it takes its colours
 // from, in pixels.
-private let ambientSize = SIMD2<Float>(128, 48)
+private let ambientSize = SIMD2<Float>(256, 96)
+// How far out from the middle of each eye's view the arrow pointing back
+// to the canvas sits, as a share of the way to the edge, and half its
+// length in pixels.
+private let arrowReach: Float = 0.6
+private let arrowHalfLength: Float = 48
 // Samples a pixel, for smooth edges.
 private let sampleCount = 4
 // Clip distances for the room's depth range, in room units (1 is where the
@@ -270,6 +343,7 @@ final class Renderer: @unchecked Sendable {
     // takes its colours from, eased from frame to frame.
     private let haloPipeline: MTLRenderPipelineState
     private let ambientPipeline: MTLRenderPipelineState
+    private let arrowPipeline: MTLRenderPipelineState
     private var ambient: MTLTexture?
     private var ambientStarted = false
     private let sampler: MTLSamplerState
@@ -306,10 +380,15 @@ final class Renderer: @unchecked Sendable {
         panelPipeline = try device.makeRenderPipelineState(descriptor: panelDescriptor)
         panelDescriptor.fragmentFunction = library.makeFunction(name: "haloFragment")
         haloPipeline = try device.makeRenderPipelineState(descriptor: panelDescriptor)
+        panelDescriptor.vertexFunction = library.makeFunction(name: "arrowVertex")
+        panelDescriptor.fragmentFunction = library.makeFunction(name: "arrowFragment")
+        arrowPipeline = try device.makeRenderPipelineState(descriptor: panelDescriptor)
         let ambientDescriptor = MTLRenderPipelineDescriptor()
         ambientDescriptor.vertexFunction = library.makeFunction(name: "ambientVertex")
         ambientDescriptor.fragmentFunction = library.makeFunction(name: "ambientFragment")
-        ambientDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        // Half floats, in linear light: easing it a little each frame in
+        // eight bits would stop short in steps, and the glow show bands.
+        ambientDescriptor.colorAttachments[0].pixelFormat = .rgba16Float
         // Each frame moves the copy a fifth of the way to the canvas, so the
         // glow drifts rather than flickers.
         let ease = ambientDescriptor.colorAttachments[0]!
@@ -320,7 +399,7 @@ final class Renderer: @unchecked Sendable {
         ease.destinationAlphaBlendFactor = .zero
         ambientPipeline = try device.makeRenderPipelineState(descriptor: ambientDescriptor)
         let ambientTexture = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm_srgb, width: Int(ambientSize.x), height: Int(ambientSize.y), mipmapped: false)
+            pixelFormat: .rgba16Float, width: Int(ambientSize.x), height: Int(ambientSize.y), mipmapped: true)
         ambientTexture.usage = [.renderTarget, .shaderRead]
         ambientTexture.storageMode = .private
         ambient = device.makeTexture(descriptor: ambientTexture)
@@ -406,6 +485,9 @@ final class Renderer: @unchecked Sendable {
                 drawPanels(
                     of: room, eye: eye, viewProjection: viewProjection, scanEndViewProjection: scanEnd ?? viewProjection,
                     images: images, sharpen: sharpen, softEdges: softEdges, encoder: encoder)
+                if let way = room.pointBack {
+                    drawArrow(pointing: way, width: Float(width), height: Float(height), encoder: encoder)
+                }
             }
         }
         encoder.endEncoding()
@@ -442,7 +524,25 @@ final class Renderer: @unchecked Sendable {
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
         encoder.endEncoding()
+        // Smaller and smaller copies, for the glow to blur more farther out.
+        if let blit = commandBuffer.makeBlitCommandEncoder() {
+            blit.generateMipmaps(for: ambient)
+            blit.endEncoding()
+        }
         ambientStarted = true
+    }
+
+    /// The arrow towards the canvas, the same in both eyes, so it looks far
+    /// away, out along `way` from the middle of the view.
+    private func drawArrow(pointing way: SIMD2<Float>, width: Float, height: Float, encoder: MTLRenderCommandEncoder) {
+        var arrow = [
+            SIMD4(way.x * arrowReach, way.y * arrowReach, way.x, way.y),
+            SIMD4(2 * arrowHalfLength / width, 2 * arrowHalfLength / height, 0, 0),
+        ]
+        encoder.setRenderPipelineState(arrowPipeline)
+        encoder.setDepthStencilState(overDepthState)
+        encoder.setVertexBytes(&arrow, length: MemoryLayout<SIMD4<Float>>.stride * arrow.count, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
 
     private func drawPanels(
@@ -476,7 +576,10 @@ final class Renderer: @unchecked Sendable {
                     panel.highlighted ? 1 : 0, Float(rows), isCanvas && sharpen ? 1 : 0,
                     !softEdges || panel.source == .pointer ? 0 : isCanvas ? 1 : 2),
                 spin0: SIMD4(spin.columns.0, 0), spin1: SIMD4(spin.columns.1, 0), spin2: SIMD4(spin.columns.2, 0),
-                lens: lens, lensGrid: lensGrid, halo: panel.halo)
+                lens: lens, lensGrid: lensGrid, halo: panel.halo,
+                // The dashboard's cards and the pinned window hide the glow
+                // behind them.
+                backing: SIMD4(panel.source == .status || panel.source == .pinned ? 1 : 0, 0, 0, 0))
             encoder.setRenderPipelineState(isAmbient ? haloPipeline : panelPipeline)
             encoder.setDepthStencilState(panel.source == .pointer || isAmbient ? overDepthState : depthState)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
@@ -502,6 +605,7 @@ final class Renderer: @unchecked Sendable {
         var lens: SIMD4<Float>
         var lensGrid: SIMD4<Float>
         var halo: SIMD4<Float>
+        var backing: SIMD4<Float>
     }
 
     /// `distortion`'s offsets as a texture the vertex shader looks up in,

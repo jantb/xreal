@@ -87,33 +87,40 @@ private func freshState() -> ViewerState {
     #expect(state.frame(headAt(biasRevision: 1)).biasChanged == false)
 }
 
-@Test func theCanvasCannotBePickedUpWithoutLookingAtIt() {
+@Test func theCanvasPickedUpWhileLookingAwayComesToTheMiddleOfTheView() throws {
     var state = freshState()
-    let outcome3 = state.startGrab()
-    #expect(!outcome3)
-    state.frame(headAt(yaw: 0))
-    state.frame(headAt(yaw: 3))
-    let outcome4 = state.startGrab()
-    #expect(!outcome4)
-    state.frame(headAt(yaw: 0))
-    let outcome5 = state.startGrab()
-    #expect(outcome5)
+    state.frame(headAt(yaw: 0), now: 0)
+    state.frame(headAt(yaw: 3), now: 0.1)
+    #expect(state.gaze == nil)
+    let pickedUp = state.startGrab(now: 0.1)
+    #expect(pickedUp)
+    let pickedUpAgain = state.startGrab(now: 0.1)
+    #expect(!pickedUpAgain)
+    state.frame(headAt(yaw: 3), now: 1.1)
+    let gaze = try #require(state.gaze)
+    let canvas = state.settings.canvas
+    #expect(simd_distance(gaze, SIMD2(Float(canvas.width), Float(canvas.height)) / 2) < 50)
 }
 
-@Test func aCarriedCanvasFollowsTheHeadAndStaysWhereItIsLetGo() {
+@Test func aCarriedCanvasFollowsTheHeadAndStaysWhereItIsLetGo() throws {
     var state = freshState()
-    state.frame()
-    let outcome6 = state.startGrab()
-    #expect(outcome6)
-    state.frame(headAt(yaw: 0.5))
-    #expect(abs(state.settings.canvas.placement.direction.x) > 0.3)
-    let outcome7 = state.endGrab()
-    #expect(outcome7)
-    let letGoAt = state.settings.canvas.placement
-    state.frame(headAt(yaw: 0))
-    #expect(state.settings.canvas.placement == letGoAt)
-    let outcome8 = state.endGrab()
-    #expect(!outcome8)
+    state.frame(now: 0)
+    let pickedUp = state.startGrab(now: 0)
+    #expect(pickedUp)
+    state.frame(headAt(yaw: 0.5), now: 0.5)
+    // Carried, it is in the middle of the view wherever the head turns...
+    let carried = try #require(state.gaze)
+    #expect(abs(carried.x - Float(state.settings.canvas.width) / 2) < 50)
+    let letGo = state.endGrab(now: 0.5)
+    #expect(letGo)
+    let letGoAgain = state.endGrab(now: 0.5)
+    #expect(!letGoAgain)
+    // ...and let go, it stays behind when the head turns back.
+    state.frame(headAt(yaw: 0), now: 1)
+    #expect(state.gaze.map { abs($0.x - Float(state.settings.canvas.width) / 2) > 500 } ?? true)
+    state.frame(headAt(yaw: 0.5), now: 1.5)
+    let again = try #require(state.gaze)
+    #expect(abs(again.x - carried.x) < 50)
 }
 
 @Test func aCanvasLetGoNearlyLevelIsSetLevelButATiltedOneKeepsItsTilt() {
@@ -259,4 +266,42 @@ private func turnSeen(framesLate late: Double) throws -> Float {
     #expect(glow.contains { $0.rect.top > 1 } && glow.contains { $0.rect.bottom < -1 })
     // A canvas still starting up has nothing to take colours from.
     #expect(!(try #require(state.frame(sizes: [nil, nil, nil]).room)).panels.contains { $0.source == .ambient })
+}
+
+@Test(arguments: [-2, 2] as [Float])
+func lookingAwayFromTheCanvasShowsAnArrowTowardsIt(yaw: Float) throws {
+    var state = freshState()
+    #expect(state.frame(headAt(yaw: 0)).room?.pointBack == nil)
+    let room = try #require(state.frame(headAt(yaw: yaw)).room)
+    let way = try #require(room.pointBack)
+    // Turning the way it points faces the canvas more.
+    let turn = room.headRotation * SIMD3(way.x, way.y, 0)
+    #expect(simd_dot(turn, state.settings.canvas.placement.direction) > 0)
+}
+
+@Test func resettingTheZoomPutsTheCanvasBackAtItsOwnDistanceEvenWhileCarried() {
+    var state = freshState()
+    let own = state.settings.canvas.placement.distance
+    state.moveCanvas(closer: true, now: 0)
+    state.moveCanvas(closer: true, now: 0)
+    state.resetZoom(now: 0)
+    #expect(state.settings.canvas.placement.distance == own)
+
+    state.frame(now: 0)
+    _ = state.startGrab(now: 0)
+    state.moveCanvas(closer: false, now: 0)
+    state.resetZoom(now: 0)
+    state.frame(now: 0.1)
+    _ = state.endGrab(now: 0.1)
+    #expect(abs(state.settings.canvas.placement.distance - own) < 1e-6)
+}
+
+@Test func theDashboardHangsNearerThanTheCanvas() throws {
+    var state = freshState()
+    let room = try #require(state.frame(extras: ExtraSizes(status: SIMD2(1600, 170))).room)
+    let dashboard = try #require(room.panels.first { $0.source == .status })
+    let canvas = try #require(room.panels.first { $0.tile != nil })
+    let dashboardBottom = dashboard.surface.point(at: SIMD2(0, dashboard.rect.bottom))
+    let canvasTop = canvas.surface.point(at: SIMD2((canvas.rect.left + canvas.rect.right) / 2, 1))
+    #expect(length(dashboardBottom) < 0.9 * length(canvasTop))
 }

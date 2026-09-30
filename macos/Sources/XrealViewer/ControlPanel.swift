@@ -333,6 +333,7 @@ private struct CanvasSection: View {
                 .font(.caption).foregroundStyle(.secondary)
             }
             Button("Put Canvas Back Straight Ahead") { model.perform(.resetView) }
+            Button("Reset Zoom") { model.perform(.resetZoom) }
         }
     }
 }
@@ -565,8 +566,9 @@ private struct WindowsSection: View {
 private struct ShortcutsSection: View {
     private let shortcuts: [(keys: String, action: String)] = [
         ("⌃⌥⌘C", "Recenter"),
-        ("⌃⌥⌘G", "Hold while looking at the canvas to carry it"),
+        ("⌃⌥⌘G", "Hold to bring the canvas in front of you and carry it; tilt your head to tilt it"),
         ("⌃⌥⌘=  ⌃⌥⌘-", "Bring the canvas closer, push it away"),
+        ("⌃⌥⌘0", "Reset zoom"),
         ("⌃⌥⌘]  ⌃⌥⌘[", "Next canvas size up, down"),
         ("⌃⌥⌘W", "Move the focused window to where you look"),
         ("⌃⌥⌘F", "Fit the focused window to the zone you look at"),

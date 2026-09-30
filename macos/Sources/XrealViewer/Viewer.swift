@@ -11,6 +11,9 @@ private let outOfViewFps = 10
 // Captures this far outside the view, as a fraction of it, count as in view,
 // so a quick turn finds them already at the full rate.
 private let inViewMargin: Float = 1
+// How far past the view's edges the canvas, the dashboard or the pinned
+// window can go, as a share of its size, before an arrow points back.
+private let pointBackMargin: Float = 0.05
 // A capture stays at the full rate this long after it was last in view.
 // Changing a capture's rate makes the capture hitch for a moment, so a fast
 // pan back and forth should not change it at every tile edge.
@@ -56,8 +59,11 @@ let minCurveRadius: Float = 0.5
 let maxCurveRadius: Float = 5
 // How far the glow round the canvas reaches past its edges, in points, and
 // how bright it is at the edge.
-private let ambientReach: Float = 360
+private let ambientReach: Float = 480
 private let ambientBrightness: Float = 0.75
+// How far the dashboard and the pinned window hang, as a share of how far
+// they would hang on the canvas's own surface.
+private let overheadNearness: Float = 0.8
 // How long the canvas stays outlined after it was moved closer or away.
 private let outlineTime = 1.0
 // macOS nudges displays apart after an arrangement is applied; they are
@@ -131,6 +137,9 @@ enum ViewerCommand {
     case grab(Bool)
     /// Brings the canvas closer (true) or pushes it away (false).
     case moveCanvas(closer: Bool)
+    /// Back to the canvas's own distance, one of its pixels to each of the
+    /// glasses' pixels.
+    case resetZoom
     /// Makes the canvas larger (true) or smaller.
     case resizeCanvas(bigger: Bool)
     case setCanvasSize(width: Int, height: Int, scale: Int)
@@ -224,25 +233,41 @@ struct ViewerState: Sendable {
         viewport.recenter(lastPose)
     }
 
-    /// Picks up the canvas if it is being looked at. Returns false if not.
-    mutating func startGrab() -> Bool {
-        guard grab == nil, gaze != nil else { return false }
-        grab = ScreenGrab(placement: settings.canvas.placement, headRotation: viewport.headRotation)
+    /// Picks up the canvas, wherever it is, to carry it with the head: it
+    /// glides to straight ahead and stays there, tilting as the head does.
+    /// While it is carried, straight ahead follows the head, as putting the
+    /// canvas back straight ahead makes it, so everything round it keeps
+    /// its shape. Returns false if it was already carried.
+    mutating func startGrab(now: Double = monotonicNow()) -> Bool {
+        guard grab == nil else { return false }
+        grab = ScreenGrab(placement: settings.canvas.placement, headRotation: viewport.headRotation, at: now)
         grabDistance = settings.canvas.placement.distance
         return true
     }
 
-    /// Lets go of the carried canvas where it is now. Returns false if it
-    /// was not carried.
-    mutating func endGrab() -> Bool {
+    /// Lets go of the carried canvas where it is now, set level if nearly
+    /// so. Returns false if it was not carried.
+    mutating func endGrab(now: Double = monotonicNow()) -> Bool {
         guard let grab else { return false }
-        var placement = grab.placement(headRotation: viewport.headRotation, distance: grabDistance)
+        var placement = grab.placement(headRotation: viewport.headRotation, distance: grabDistance, at: now)
         if abs(placement.tilt) < levelSnapTilt {
             placement.tilt = 0
         }
         settings.canvas.placement = placement
         self.grab = nil
+        // Straight ahead moved with the head, so drift measured against
+        // the old one no longer holds.
+        drift.reset()
         return true
+    }
+
+    mutating func resetZoom(now: Double) {
+        if grab != nil {
+            grabDistance = 1
+        } else {
+            settings.canvas.placement.distance = 1
+        }
+        outlineUntil = now + outlineTime
     }
 
     mutating func moveCanvas(closer: Bool, now: Double) {
@@ -284,7 +309,11 @@ struct ViewerState: Sendable {
         settings.canvas.width = width
         settings.canvas.height = height
         settings.canvas.scale = scale
-        grab = nil
+        if grab != nil {
+            // Straight ahead followed the head while it was carried.
+            grab = nil
+            drift.reset()
+        }
         gaze = nil
         outlineUntil = now + outlineTime
         return true
@@ -324,6 +353,9 @@ struct ViewerState: Sendable {
             drift.reset()
             viewport.recenter(pose)
         }
+        if grab != nil {
+            viewport.recenter(pose)
+        }
         viewport.track(pose: pose)
         var room = roomView(now: now, dt: dt, output: output, frameSizes: frameSizes, cursor: cursor, extras: extras)
         if settings.prediction {
@@ -342,7 +374,7 @@ struct ViewerState: Sendable {
     ) -> RoomView {
         let rotation = viewport.headRotation
         if let grab {
-            settings.canvas.placement = grab.placement(headRotation: rotation, distance: grabDistance)
+            settings.canvas.placement = grab.placement(headRotation: rotation, distance: grabDistance, at: now)
         }
         let (canvas, curveRadius) = (settings.canvas, settings.curveRadius)
         gaze = gazeTarget(rotation * SIMD3(0, 0, -1), on: canvas, curveRadius: curveRadius)
@@ -380,7 +412,9 @@ struct ViewerState: Sendable {
         // A canvas still starting up has nothing to show yet.
         room.panels.removeAll { panel in panel.tile.map { $0 >= frameSizes.count || frameSizes[$0] == nil } ?? false }
 
-        // The glow round the canvas, drawn first so everything else lies on it.
+        // The glow round the canvas, drawn first so everything else lies on
+        // it; the dashboard's cards and the pinned window hide it behind
+        // them.
         let surface = canvas.surface(curveRadius: curveRadius)
         if settings.ambientLight, room.panels.contains(where: { $0.tile != nil }) {
             let size = SIMD2(Float(canvas.width), Float(canvas.height))
@@ -413,6 +447,18 @@ struct ViewerState: Sendable {
             let rect = pointerRect(canvas: canvas, at: point, size: pointer.size, hotSpot: pointer.hotSpot)
             room.panels.append(RoomView.Panel(source: .pointer, surface: surface, rect: rect))
         }
+        // Looking away from all of it, an arrow shows the way back. Looking
+        // at the canvas counts too: close up, it can fill the view with
+        // every point `shows` tries outside it.
+        let shown = room.panels.filter { $0.tile != nil || $0.source == .status || $0.source == .pinned }
+        if gaze == nil, shown.contains(where: { $0.tile != nil }),
+            !shown.contains(where: { room.shows($0, margin: pointBackMargin) })
+        {
+            let way = room.headRotation.transpose * canvas.placement.direction
+            let across = SIMD2(way.x, way.y)
+            // Straight behind, either way round is as short.
+            room.pointBack = simd_length(across) > 1e-3 ? simd_normalize(across) : SIMD2(1, 0)
+        }
         return room
     }
 
@@ -430,6 +476,9 @@ struct ViewerState: Sendable {
         func oriented(_ panel: (surface: ScreenSurface, rect: SurfaceRect)?) -> (surface: ScreenSurface, rect: SurfaceRect)? {
             guard var panel else { return nil }
             panel.surface.spin = canvas.placement.orientation * panel.surface.spin
+            // Nearer than the canvas, looking the same size: the eyes see
+            // it in front of the canvas and its glow.
+            panel.surface = panel.surface.scaled(by: overheadNearness)
             return panel
         }
         return (oriented(overheadCache?.dashboard), oriented(overheadCache?.pinned))
@@ -668,6 +717,7 @@ final class FrameLoop: @unchecked Sendable {
                 onRelease: { [unowned self] in perform(.grab(false)) }),
             hotKey(kVK_ANSI_Equal, .moveCanvas(closer: true)),
             hotKey(kVK_ANSI_Minus, .moveCanvas(closer: false)),
+            hotKey(kVK_ANSI_0, .resetZoom),
             hotKey(kVK_ANSI_RightBracket, .resizeCanvas(bigger: true)),
             hotKey(kVK_ANSI_LeftBracket, .resizeCanvas(bigger: false)),
             hotKey(kVK_ANSI_W, .window(.moveToGaze)),
@@ -787,6 +837,8 @@ final class FrameLoop: @unchecked Sendable {
                 }
             case .moveCanvas(let closer):
                 state.moveCanvas(closer: closer, now: monotonicNow())
+            case .resetZoom:
+                state.resetZoom(now: monotonicNow())
             case .resizeCanvas(let bigger):
                 restartSource = state.resizeCanvas(bigger: bigger, now: monotonicNow())
                 persist = restartSource

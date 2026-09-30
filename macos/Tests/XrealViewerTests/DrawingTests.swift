@@ -36,19 +36,27 @@ import simd
     #expect(pointer.latest.mutex.withLock { $0.frame } == nil)
 }
 
-/// A white image of `width` × `height` pixels.
-private func whiteImage(_ device: MTLDevice, width: Int, height: Int) throws -> CapturedFrame {
+/// A white image of `width` × `height` pixels, with a black border
+/// `border` pixels wide.
+private func whiteImage(_ device: MTLDevice, width: Int, height: Int, border: Int = 0) throws -> CapturedFrame {
     let descriptor = MTLTextureDescriptor.texture2DDescriptor(
         pixelFormat: .bgra8Unorm_srgb, width: width, height: height, mipmapped: false)
     let texture = try #require(device.makeTexture(descriptor: descriptor))
-    let bytes = [UInt8](repeating: 255, count: width * height * 4)
+    var bytes = [UInt8](repeating: 255, count: width * height * 4)
+    for y in 0..<height {
+        for x in 0..<width where min(x, y, width - 1 - x, height - 1 - y) < border {
+            bytes.replaceSubrange((y * width + x) * 4..<(y * width + x) * 4 + 3, with: [0, 0, 0])
+        }
+    }
     texture.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, withBytes: bytes, bytesPerRow: width * 4)
     return CapturedFrame(texture: texture)
 }
 
 /// A frame of a small white flat canvas straight ahead, with the view
 /// reaching past its edges, drawn as the glasses would get it.
-private func drawWhiteCanvas(softEdges: Bool, ambientLight: Bool = false) async throws -> MTLTexture {
+private func drawWhiteCanvas(
+    softEdges: Bool, ambientLight: Bool = false, border: Int = 0, dashboard: DashboardCards? = nil
+) async throws -> MTLTexture {
     let renderer = try Renderer()
     let layer = CAMetalLayer()
     layer.device = renderer.device
@@ -62,16 +70,65 @@ private func drawWhiteCanvas(softEdges: Bool, ambientLight: Bool = false) async 
     settings.ambientLight = ambientLight
     var state = ViewerState(settings: settings)
     let now = monotonicNow()
+    let dashboard = try dashboard.map { try cardsImage(renderer.device, width: 1600, height: 340, $0) }
     let room = try #require(
         state.advance(
             now: now, dt: 1 / 90, presentingAt: now + 1 / 90, snapshot: TrackingSnapshot(gyroBias: .zero),
-            captureGeneration: 0, newFrame: true, frameSizes: [(1920, 1080)], output: (3840, 1080), cursor: nil
+            captureGeneration: 0, newFrame: true, frameSizes: [(1920, 1080)], output: (3840, 1080), cursor: nil,
+            extras: ExtraSizes(status: dashboard.map { _ in SIMD2(800, 170) })
         ).room)
-    let images = PanelImages(canvas: [try whiteImage(renderer.device, width: 1920, height: 1080)])
+    let images = PanelImages(
+        canvas: [try whiteImage(renderer.device, width: 1920, height: 1080, border: border)], status: dashboard)
     await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
         renderer.draw(to: drawable, images: images, room: room, sharpen: true, softEdges: softEdges) { _ in
             done.resume()
         }
+    }
+    return drawable.texture
+}
+
+/// A dashboard's picture: one faint card over all of it, or two with a
+/// see-through gap between them.
+private enum DashboardCards {
+    case one, twoWithGap
+}
+
+/// A dashboard picture of `width` × `height` pixels, at two pixels a point,
+/// its cards a faint white wash.
+private func cardsImage(_ device: MTLDevice, width: Int, height: Int, _ cards: DashboardCards) throws -> CapturedFrame {
+    let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .bgra8Unorm_srgb, width: width, height: height, mipmapped: false)
+    let texture = try #require(device.makeTexture(descriptor: descriptor))
+    var bytes = [UInt8](repeating: 18, count: width * height * 4)
+    if cards == .twoWithGap {
+        for y in 0..<height {
+            bytes.replaceSubrange((y * width + width / 3) * 4..<(y * width + 2 * width / 3) * 4, with: repeatElement(0, count: width / 3 * 4))
+        }
+    }
+    texture.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, withBytes: bytes, bytesPerRow: width * 4)
+    return CapturedFrame(texture: texture, pixelsPerPoint: 2)
+}
+
+/// A frame of nothing but the arrow back to the canvas, pointing `way`.
+private func drawArrowAlone(pointing way: SIMD2<Float>) async throws -> MTLTexture {
+    let renderer = try Renderer()
+    let layer = CAMetalLayer()
+    layer.device = renderer.device
+    layer.pixelFormat = .bgra8Unorm_srgb
+    layer.framebufferOnly = false
+    layer.drawableSize = CGSize(width: 3840, height: 1080)
+    let drawable = try #require(layer.nextDrawable())
+    var state = ViewerState(settings: XrealCore.Settings())
+    let now = monotonicNow()
+    var room = try #require(
+        state.advance(
+            now: now, dt: 1 / 90, presentingAt: now + 1 / 90, snapshot: TrackingSnapshot(gyroBias: .zero),
+            captureGeneration: 0, newFrame: true, frameSizes: [], output: (3840, 1080), cursor: nil
+        ).room)
+    room.panels = []
+    room.pointBack = way
+    await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+        renderer.draw(to: drawable, images: PanelImages(), room: room, sharpen: true) { _ in done.resume() }
     }
     return drawable.texture
 }
@@ -113,6 +170,37 @@ private func row(_ texture: MTLTexture, _ y: Int) -> [UInt8] {
     #expect(glowing > 40)
     // The canvas itself is left as it is.
     #expect(lit[960 * 4] == plain[960 * 4])
+}
+
+@Test func ambientLightShowsWhatIsOnTheCanvasBeyondItsDarkEdge() async throws {
+    // White inside a black border, and all black.
+    let framed = row(try await drawWhiteCanvas(softEdges: true, ambientLight: true, border: 200), 540)
+    let black = row(try await drawWhiteCanvas(softEdges: true, ambientLight: true, border: 1080), 540)
+    // Beside the canvas, the white inside the border lights the room.
+    let lit = stride(from: 0, to: framed.count, by: 4).filter { framed[$0] > black[$0] + 30 }.count
+    #expect(lit > 40)
+}
+
+@Test func theDashboardsCardsHideTheGlowAndTheGapsBetweenThemShowIt() async throws {
+    let open = try await drawWhiteCanvas(softEdges: true, ambientLight: true)
+    let covered = try await drawWhiteCanvas(softEdges: true, ambientLight: true, dashboard: .one)
+    let gapped = try await drawWhiteCanvas(softEdges: true, ambientLight: true, dashboard: .twoWithGap)
+    // Above the canvas, where the dashboard hangs: pixels of glow a faint
+    // card hides, and pixels the gap between two cards shows again.
+    var hidden = 0
+    var shown = 0
+    for y in stride(from: 0, to: 300, by: 10) {
+        let (lit, behind, between) = (row(open, y), row(covered, y), row(gapped, y))
+        for x in stride(from: 0, to: lit.count, by: 4) where lit[x + 2] > 40 && behind[x + 2] < 30 {
+            hidden += 1
+            if between[x + 2] > 40 {
+                shown += 1
+            }
+        }
+    }
+    #expect(hidden > 100)
+    #expect(shown > 30)
+    #expect(shown < hidden)
 }
 
 @Test(arguments: [-0.8, 0, 0.8] as [Float])
@@ -200,4 +288,16 @@ func identicalEyesSeeIdenticalPixelsWhenPanningAcrossAWideCanvas(yaw: Float) asy
     }
     #expect(abs(Int(values[0]) - Int(values[1])) <= 2,
             "A tiny resize changed the stroke from \(values[0]) to \(values[1])")
+}
+
+@Test func theArrowBackToTheCanvasShowsInEachEyeOnTheSideItPoints() async throws {
+    let middle = row(try await drawArrowAlone(pointing: SIMD2(1, 0)), 540)
+    // Blue, the way the canvas's outline is.
+    func lit(_ x: Int) -> Bool { middle[x * 4] > 100 && middle[x * 4] > middle[x * 4 + 2] }
+    for eye in 0..<2 {
+        let left = (eye * 1920)..<(eye * 1920 + 960)
+        let right = (eye * 1920 + 960)..<(eye * 1920 + 1920)
+        #expect(right.contains(where: lit), "eye \(eye)")
+        #expect(!left.contains(where: lit), "eye \(eye)")
+    }
 }

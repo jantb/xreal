@@ -158,6 +158,16 @@ public struct ScreenSurface: Equatable, Sendable {
         self.wrap = wrap
     }
 
+    /// The same surface `factor` times as far from the viewer, so from
+    /// between the eyes it looks just the same, only nearer or farther.
+    public func scaled(by factor: Float) -> ScreenSurface {
+        var scaled = self
+        scaled.center *= factor
+        scaled.right *= factor
+        scaled.up *= factor
+        return scaled
+    }
+
     /// The radius of each row's arc, for a curved screen.
     private var rowRadius: Float { length(right) / halfArc }
 
@@ -498,22 +508,41 @@ public func windowOrigin(size: CGSize, centeredOn point: CGPoint, within bounds:
         y: axis(point.y, size.height, bounds.minY, bounds.maxY).rounded())
 }
 
-/// A screen being carried by the head: it keeps its place in the view while
-/// the head turns and tilts, and stays where it was when let go, tilted as
-/// the head was.
+// How long a screen picked up off to the side takes to glide most of the
+// way to straight ahead, in seconds.
+private let grabGlideTime = 0.12
+
+/// A screen being carried by the head: from where it was in view when
+/// picked up it glides to straight ahead, and stays there while the head
+/// turns and tilts, and where it was when let go, tilted as the head was.
 public struct ScreenGrab: Equatable, Sendable {
     private let inView: SIMD3<Float>
     private let upInView: SIMD3<Float>
+    private let pickedUpAt: Double
 
-    /// `headRotation` turns head directions into room directions.
-    public init(placement: ScreenPlacement, headRotation: simd_float3x3) {
+    /// `headRotation` turns head directions into room directions; `now`
+    /// is when it is picked up, in seconds.
+    public init(placement: ScreenPlacement, headRotation: simd_float3x3, at now: Double = 0) {
         inView = headRotation.transpose * placement.direction
         upInView = headRotation.transpose * placement.up
+        pickedUpAt = now
     }
 
-    public func placement(headRotation: simd_float3x3, distance: Float) -> ScreenPlacement {
-        ScreenPlacement(direction: headRotation * inView, distance: distance)
-            .tilted(toward: headRotation * upInView)
+    /// Where it hangs with the head turned as `headRotation` says, `now`
+    /// seconds on the clock it was picked up with; by default long after.
+    public func placement(headRotation: simd_float3x3, distance: Float, at now: Double = .infinity) -> ScreenPlacement {
+        let glided = Float(1 - exp(-max(now - pickedUpAt, 0) / grabGlideTime))
+        let ahead = SIMD3<Float>(0, 0, -1)
+        let angle = acos(min(max(dot(inView, ahead), -1), 1)) * glided
+        // Straight behind, it comes round over the top.
+        let turnAxis = cross(inView, ahead)
+        let axis = length(turnAxis) > 1e-5 ? normalize(turnAxis) : SIMD3<Float>(1, 0, 0)
+        let turn = simd_quatf(angle: angle, axis: axis)
+        // Coming round upside down, the blend can pass through nothing.
+        let blended = simd_mix(turn.act(upInView), SIMD3(0, 1, 0), SIMD3(repeating: glided))
+        let up = length(blended) > 1e-3 ? normalize(blended) : SIMD3<Float>(0, 1, 0)
+        return ScreenPlacement(direction: headRotation * turn.act(inView), distance: distance)
+            .tilted(toward: headRotation * up)
     }
 }
 
@@ -579,6 +608,9 @@ public struct RoomView: Sendable {
     /// The eyes whose views the output holds side by side, in that order,
     /// with their positions in room units.
     public var eyes: [EyeOptics] = []
+    /// Which way the canvas is, across the view with y up, while nothing of
+    /// it or above it is in view; nil while something is.
+    public var pointBack: SIMD2<Float>?
 
     /// Whether the view zoomed out by `scale` (below 1 widens it) shows the
     /// room point `point` inside `margin` of its size.

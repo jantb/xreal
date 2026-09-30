@@ -252,6 +252,26 @@ func lookingAtAPointOnAScreenCurvedLikeAMonitorFindsThatPixel(radius: Float) thr
     }
 }
 
+@Test func aScreenPickedUpOffToTheSideStartsWhereItWasAndGlidesToTheMiddle() throws {
+    let aside = ScreenPlacement(direction: normalize(SIMD3(1, 0.3, -1)))
+    let grab = ScreenGrab(placement: aside, headRotation: ahead, at: 10)
+    let view = RoomView(headRotation: ahead, tanHalfFov: SIMD2(1, 0.5625), panels: [])
+    func middle(at now: Double) throws -> SIMD2<Float> {
+        let placement = grab.placement(headRotation: ahead, distance: aside.distance, at: now)
+        return try #require(view.outputPoint(ofRoom: placement.frame(width: 1920, height: 1080).center))
+    }
+    let before = try #require(view.outputPoint(ofRoom: aside.frame(width: 1920, height: 1080).center))
+    #expect(simd_distance(try middle(at: 10), before) < 1e-3)
+    #expect(simd_length(try middle(at: 11)) < 1e-3)
+}
+
+@Test func aScreenPickedUpBehindTheHeadStillComesToTheMiddle() throws {
+    let behind = ScreenPlacement(direction: SIMD3(0, 0, 1))
+    let grab = ScreenGrab(placement: behind, headRotation: ahead, at: 0)
+    let placement = grab.placement(headRotation: ahead, distance: behind.distance, at: 1)
+    #expect(simd_distance(placement.direction, SIMD3(0, 0, -1)) < 1e-3)
+}
+
 /// The head turned by `yaw` and tilted by `roll`, as the viewport builds it.
 private func headRotation(yaw: Float = 0, roll: Float) -> simd_float3x3 {
     var viewport = ViewportController(settings: Settings())
@@ -453,5 +473,19 @@ private func footprint(of surface: ScreenSurface, at position: SIMD2<Float>, ste
         let side = surface.point(at: SIMD2(1, 0))
         // The right edge is still on the right, short of behind the viewer.
         #expect(atan2(side.x, -side.z) > 0 && atan2(side.x, -side.z) < 3, "\(width)x\(height)")
+    }
+}
+
+@Test(arguments: [false, true])
+func aSurfaceBroughtNearerLooksTheSameFromBetweenTheEyes(wrapped: Bool) {
+    var screen = RoomScreen(width: 1920, height: 1080, curved: true)
+    screen.spherical = wrapped
+    let surface = screen.surface()
+    let nearer = surface.scaled(by: 0.8)
+    for position in [SIMD2<Float>(0, 0), SIMD2(-1, 1), SIMD2(1, -1), SIMD2(0.5, 1.4)] {
+        let far = surface.point(at: position)
+        let near = nearer.point(at: position)
+        #expect(simd_distance(normalize(far), normalize(near)) < 1e-4, "\(position)")
+        #expect(abs(length(near) - 0.8 * length(far)) < 1e-4, "\(position)")
     }
 }

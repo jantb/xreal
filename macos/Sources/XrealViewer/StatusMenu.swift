@@ -54,6 +54,7 @@ private final class ActionItem: NSMenuItem {
         menu.addItem(shortcut("Recenter", "c") { [viewer] in viewer.perform(.recenter) })
         menu.addItem(ActionItem("Calibrate Gyro (Keep Glasses Still)") { [viewer] in viewer.perform(.calibrate) })
         menu.addItem(ActionItem("Put Canvas Back Straight Ahead") { [viewer] in viewer.perform(.resetView) })
+        menu.addItem(shortcut("Reset Zoom", "0") { [viewer] in viewer.perform(.resetZoom) })
         menu.addItem(.separator())
 
         menu.addItem(
