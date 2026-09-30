@@ -200,12 +200,19 @@ private let shaderSource = """
         // to one a single sample stays sharpest. Colours are premultiplied,
         // so the pointer's see-through parts blend over the canvas.
         float2 size = float2(source.get_width(), source.get_height());
-        if (max(length(dx * size), length(dy * size)) < 1.02) {
+        float footprint = max(length(dx * size), length(dy * size));
+        float blend = smoothstep(1.0, 1.25, footprint);
+        if (blend <= 0) {
             return fade * (panel.outline.z > 0.5 ? sampleSharp(source, linear, in.uv, size) : source.sample(linear, in.uv));
         }
-        return fade * 0.25
+        float4 averaged = 0.25
             * (source.sample(linear, in.uv + 0.25 * (dx + dy)) + source.sample(linear, in.uv + 0.25 * (dx - dy))
                 + source.sample(linear, in.uv - 0.25 * (dx + dy)) + source.sample(linear, in.uv - 0.25 * (dx - dy)));
+        // Continuous across the magnification boundary: resizing or
+        // panning must not suddenly change the shape of thin text strokes.
+        if (blend >= 1) { return fade * averaged; }
+        float4 sharp = panel.outline.z > 0.5 ? sampleSharp(source, linear, in.uv, size) : source.sample(linear, in.uv);
+        return fade * mix(sharp, averaged, blend);
     }
     """
 

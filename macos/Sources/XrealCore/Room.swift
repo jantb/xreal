@@ -429,9 +429,13 @@ public struct RoomScreen: Equatable, Sendable {
                 rowRadius *= 1.05
             }
         }
+        // Keep a wrapped canvas centred on the viewer even when its size
+        // would otherwise force a larger radius. Fit its extents uniformly
+        // instead of shifting the centre of its sphere behind the eyes.
+        let fit = spherical ? placement.distance / rowRadius : 1
         return ScreenSurface(
-            center: SIMD3(0, 0, -placement.distance), right: SIMD3(halfWidth * grow, 0, 0),
-            up: SIMD3(0, halfHeight * grow, 0), halfArc: halfWidth * grow / rowRadius, spin: placement.orientation,
+            center: SIMD3(0, 0, -placement.distance), right: SIMD3(halfWidth * grow * fit, 0, 0),
+            up: SIMD3(0, halfHeight * grow * fit, 0), halfArc: halfWidth * grow / rowRadius, spin: placement.orientation,
             wrap: wrap)
     }
 }

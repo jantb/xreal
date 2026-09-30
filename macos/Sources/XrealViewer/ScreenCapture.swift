@@ -66,6 +66,7 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     private let textureCache: CVMetalTextureCache
     @MainActor private var stream: SCStream?
     @MainActor private var configuration: SCStreamConfiguration?
+    @MainActor private var updatingConfiguration = false
     @MainActor private(set) var fps = 0
     /// The captured window's size in points and density, and the longest
     /// side allowed, while capturing a window.
@@ -121,17 +122,27 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     }
 
     /// Follows the captured window to `size`, in points.
-    @MainActor func resizeWindow(to size: CGSize) async {
-        guard let stream, let configuration, let window = windowCapture, window.size != size else { return }
-        windowCapture?.size = size
+    @MainActor func resizeWindow(to size: CGSize) async -> Bool {
+        guard let stream, let configuration, let window = windowCapture else { return false }
+        guard window.size != size else { return true }
+        guard !updatingConfiguration else { return false }
+        updatingConfiguration = true
+        defer { updatingConfiguration = false }
         let pixels = Self.pixelSize(of: size, scale: window.scale, maxPixels: window.maxPixels)
-        pixelsPerPoint.withLock { $0 = Float(pixels.width) / Float(max(size.width, 1)) }
+        let previous = (configuration.width, configuration.height)
         configuration.width = pixels.width
         configuration.height = pixels.height
         do {
             try await stream.updateConfiguration(configuration)
+            guard self.stream === stream else { return false }
+            windowCapture?.size = size
+            pixelsPerPoint.withLock { $0 = Float(pixels.width) / Float(max(size.width, 1)) }
+            return true
         } catch {
+            configuration.width = previous.0
+            configuration.height = previous.1
             eprint("Could not change the capture size: \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -171,12 +182,17 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
 
     /// Changes how often frames are captured, while capturing.
     @MainActor func setFps(_ fps: Int) async {
-        guard let stream, let configuration, fps != self.fps else { return }
-        self.fps = fps
+        guard let stream, let configuration, fps != self.fps, !updatingConfiguration else { return }
+        updatingConfiguration = true
+        defer { updatingConfiguration = false }
+        let previous = configuration.minimumFrameInterval
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         do {
             try await stream.updateConfiguration(configuration)
+            guard self.stream === stream else { return }
+            self.fps = fps
         } catch {
+            configuration.minimumFrameInterval = previous
             eprint("Could not change the capture rate: \(error.localizedDescription)")
         }
     }
@@ -185,6 +201,8 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         guard let current = stream else { return }
         stream = nil
         configuration = nil
+        fps = 0
+        windowCapture = nil
         try? await current.stopCapture()
         latest.publish(nil)
     }

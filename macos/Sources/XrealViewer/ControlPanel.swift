@@ -65,6 +65,11 @@ struct Headline {
     private(set) var windowControlAllowed = true
     /// Windows that can be pinned above the canvas, as last looked up.
     private(set) var pinnableWindows: [PinnableWindow] = []
+    private(set) var windowsLoading = false
+    private(set) var windowsError: String?
+    private(set) var pinnedWindowStatus: String?
+    private(set) var pinnedWindowID: CGWindowID?
+    private var windowsTask: Task<Void, Never>?
 
     init(viewer: Viewer) {
         self.viewer = viewer
@@ -84,6 +89,8 @@ struct Headline {
         (info, source) = viewer.statusInfo()
         screenRecordingAllowed = CGPreflightScreenCaptureAccess()
         windowControlAllowed = WindowControl.allowed(prompt: false)
+        pinnedWindowStatus = viewer.pinnedWindowStatus
+        pinnedWindowID = viewer.preferredPinnedWindowID
     }
 
     func perform(_ command: ViewerCommand) {
@@ -99,8 +106,19 @@ struct Headline {
     }
 
     func refreshPinnableWindows() {
-        Task {
-            pinnableWindows = await viewer.pinnableWindows()
+        windowsTask?.cancel()
+        windowsLoading = true
+        windowsError = nil
+        windowsTask = Task {
+            do {
+                let windows = try await viewer.pinnableWindows()
+                guard !Task.isCancelled else { return }
+                pinnableWindows = windows
+            } catch {
+                guard !Task.isCancelled else { return }
+                windowsError = error.localizedDescription
+            }
+            windowsLoading = false
         }
     }
 
@@ -365,37 +383,93 @@ private struct ViewSection: View {
 
 private struct AboveCanvasSection: View {
     let model: ControlModel
+    @State private var choosingWindow = false
 
     var body: some View {
         let pinned = model.settings.pinnedWindow
-        let windows = model.pinnableWindows.map(\.window)
         Section("Above the Canvas") {
             Toggle("Dashboard", isOn: model.toggle(\.settings.statusStrip, .toggleStatusStrip))
-            HStack {
-                Picker(
-                    "Pinned Window",
-                    selection: Binding(get: { pinned }, set: { model.perform(.setPinnedWindow($0)) })
-                ) {
-                    Text("None").tag(PinnedWindow?.none)
-                    if let pinned, !windows.contains(pinned) {
-                        Text(verbatim: pinned.title.isEmpty ? pinned.bundleID : pinned.title).tag(PinnedWindow?.some(pinned))
+            LabeledContent("Pinned Window") {
+                HStack {
+                    Text(pinned?.title ?? "None").lineLimit(1).truncationMode(.middle)
+                    Button("Choose…") {
+                        model.refreshPinnableWindows()
+                        choosingWindow = true
                     }
-                    ForEach(model.pinnableWindows, id: \.self) { choice in
-                        Text(verbatim: choice.label).tag(PinnedWindow?.some(choice.window))
+                    if pinned != nil {
+                        Button("Remove") { model.perform(.setPinnedWindow(nil)) }
                     }
                 }
-                Button {
-                    model.refreshPinnableWindows()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .help("Look for windows again")
+            }
+            .sheet(isPresented: $choosingWindow) { PinnedWindowChooser(model: model) }
+            if let status = model.pinnedWindowStatus {
+                Text(status).font(.caption).foregroundStyle(.secondary)
             }
             Text(
                 "Look up to see them: the Mac's CPU, memory, GPU, network, battery and disk, its busiest apps, the glasses and latency, and the pinned window beside them. The pinned window can stay anywhere, even on the glasses' own display behind the view."
             )
             .font(.caption).foregroundStyle(.secondary)
         }
+    }
+}
+
+private struct PinnedWindowChooser: View {
+    let model: ControlModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var search = ""
+
+    private var choices: [PinnableWindow] { model.pinnableWindows.filter { $0.matches(search) } }
+
+    private func detail(_ choice: PinnableWindow) -> String {
+        let duplicates = model.pinnableWindows.filter { $0.window == choice.window }
+        let number = duplicates.count > 1
+            ? " · \((duplicates.firstIndex { $0.id == choice.id } ?? 0) + 1) of \(duplicates.count)"
+            : ""
+        return "\(choice.appName) · \(choice.width) × \(choice.height)\(number)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Choose a Pinned Window").font(.title2)
+            TextField("Search apps and window titles", text: $search)
+                .textFieldStyle(.roundedBorder)
+            if let error = model.windowsError {
+                Text("Could not list windows: \(error)").foregroundStyle(.red)
+            }
+            if model.windowsLoading { ProgressView("Looking for windows…") }
+            List(choices) { choice in
+                Button {
+                    model.perform(.pinWindow(choice))
+                    dismiss()
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(choice.window.title).lineLimit(2)
+                            Text(detail(choice))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if choice.id == model.pinnedWindowID { Image(systemName: "checkmark") }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.vertical, 4)
+            }
+            .overlay {
+                if choices.isEmpty && !model.windowsLoading && model.windowsError == nil {
+                    Text(search.isEmpty ? "No windows available. Open a window and refresh." : "No matching windows.")
+                        .foregroundStyle(.secondary).padding()
+                }
+            }
+            HStack {
+                Button("Refresh") { model.refreshPinnableWindows() }.disabled(model.windowsLoading)
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 560, height: 460)
     }
 }
 
@@ -521,6 +595,10 @@ private struct DiagnosticsSection: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                if let p95 = model.info.timing.workP95 {
+                    Text(String(format: "Pose-to-GPU workload: median %.1f ms, p95 %.1f ms", (model.info.timing.workMedian ?? 0) * 1000, p95 * 1000))
+                        .font(.caption.monospaced())
+                }
             }
         }
     }

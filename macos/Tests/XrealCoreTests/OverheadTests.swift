@@ -214,3 +214,66 @@ private func topEdge(of screen: RoomScreen, atAzimuth azimuth: Float) -> Float? 
     #expect(abs(width / perPoint - 900) < 9)
     #expect(abs(height / perPoint - 700) < 7)
 }
+
+@Test func largeWrappedCanvasesStayCentredOnTheViewerWhenTheyNeedToFit() {
+    for distance in [Float(0.3), 1, 5] {
+        let screen = RoomScreen(width: 7672, height: 4320,
+            placement: ScreenPlacement(direction: SIMD3(0.2, -0.1, -1), distance: distance, tilt: 0.3), spherical: true)
+        let surface = screen.surface()
+        for x in [Float(-1), -0.5, 0, 0.5, 1] {
+            for y in [Float(-1), -0.5, 0, 0.5, 1] {
+                let p = surface.point(at: SIMD2(x, y))
+                let dx = surface.point(at: SIMD2(x + 0.001, y)) - surface.point(at: SIMD2(x - 0.001, y))
+                let dy = surface.point(at: SIMD2(x, y + 0.001)) - surface.point(at: SIMD2(x, y - 0.001))
+                #expect(abs(length(p) - distance) < 0.001)
+                #expect(abs(dot(normalize(dx), normalize(p))) < 0.001)
+                #expect(abs(dot(normalize(dy), normalize(p))) < 0.001)
+            }
+        }
+    }
+}
+
+@Test(arguments: [
+    RoomScreen(width: 1920, height: 1080, spherical: true),
+    RoomScreen(width: 7672, height: 4320, spherical: true),
+    RoomScreen(width: 3832, height: 4320, spherical: true, verticalWrap: 0.5),
+])
+func overheadPanelsOverAWrappedCanvasFaceTheViewerAndKeepTheirAngularSilhouettesSeparate(shape: RoomScreen) throws {
+    for distance in [Float(0.3), 1, 5] {
+        for size in [SIMD2<Float>(900, 700), SIMD2<Float>(4000, 3000)] {
+            var screen = shape
+            screen.placement = ScreenPlacement(direction: SIMD3(0.2, 0.1, -1), distance: distance, tilt: 0.2)
+            let inverse = screen.placement.orientation.inverse
+            let edge = (0...128).map {
+                elevation(inverse.act(screen.surface().point(at: SIMD2(-1 + Float($0) / 64, 1))))
+            }.max()!
+            let layout = overheadLayout(canvas: screen, dashboard: SIMD2(2400, 172), pinned: size)
+            let panels = overheadPanels(canvas: screen, layout: layout)
+            var boxes: [SIMD4<Float>] = []
+            for (surface, rect) in [try #require(panels.dashboard), try #require(panels.pinned)] {
+                var box = SIMD4<Float>(.infinity, -.infinity, .infinity, -.infinity)
+                for xi in 0...16 {
+                    for yi in 0...16 {
+                        let x = rect.left + (rect.right - rect.left) * Float(xi) / 16
+                        let y = rect.bottom + (rect.top - rect.bottom) * Float(yi) / 16
+                        let p = surface.point(at: SIMD2(x, y))
+                        let dx = surface.point(at: SIMD2(x + 0.05, y)) - surface.point(at: SIMD2(x - 0.05, y))
+                        let dy = surface.point(at: SIMD2(x, y + 0.05)) - surface.point(at: SIMD2(x, y - 0.05))
+                        #expect(abs(length(p) - distance) < 0.001)
+                        #expect(abs(dot(normalize(dx), normalize(p))) < 0.005)
+                        #expect(abs(dot(normalize(dy), normalize(p))) < 0.005)
+                        let local = inverse.act(p)
+                        let a = atan2(local.x, -local.z)
+                        let e = elevation(local)
+                        box = SIMD4(min(box.x, a), max(box.y, a), min(box.z, e), max(box.w, e))
+                    }
+                }
+                #expect(box.z > edge)
+                #expect(box.w <= 1.481)
+                boxes.append(box)
+            }
+            #expect(boxes[1].x > boxes[0].y || boxes[1].z > boxes[0].w,
+                "Overlapping panels at distance \(distance), window \(size)")
+        }
+    }
+}

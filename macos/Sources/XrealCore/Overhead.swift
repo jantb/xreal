@@ -117,102 +117,113 @@ public func overheadSurface(canvas: RoomScreen, curveRadius: Float = 1, height: 
 }
 
 /// Where the dashboard and the pinned window hang, each as a surface and
-/// the part of it they cover: each a strip of `overheadSurface` from its own
-/// bottom, tilted to face the viewer at its own middle. Over a wrapped
-/// canvas each is instead part of the same sphere round the eyes, laid out
-/// as the canvas's rows are, so it curves both ways like the canvas below
-/// it and faces the eyes from every pixel.
+/// the part of it they cover. Over a flat or curved canvas each is a strip
+/// of `overheadSurface` from its own bottom, flat and tilted to face the
+/// viewer at its own middle. Over a wrapped canvas each is instead a patch
+/// of a sphere round the eyes turned towards its own middle, placed by
+/// angle clear of the canvas and of the other.
 public func overheadPanels(canvas: RoomScreen, curveRadius: Float = 1, layout: OverheadLayout)
     -> (dashboard: (surface: ScreenSurface, rect: SurfaceRect)?, pinned: (surface: ScreenSurface, rect: SurfaceRect)?)
 {
+    guard layout.height > 0 else { return (nil, nil) }
+    guard canvas.spherical else {
+        func strip(_ rect: SurfaceRect) -> (surface: ScreenSurface, rect: SurfaceRect) {
+            let points = { (y: Float) in (y + 1) / 2 * layout.height }
+            let surface = overheadSurface(
+                canvas: canvas, curveRadius: curveRadius, height: points(rect.top) - points(rect.bottom),
+                raised: points(rect.bottom))
+            return (surface, SurfaceRect(left: rect.left, right: rect.right, top: 1, bottom: -1))
+        }
+        return (layout.dashboard.map(strip), layout.pinned.map(strip))
+    }
     let turn = canvas.placement.orientation
     let distance = canvas.placement.distance
-    func panel(_ rect: SurfaceRect) -> (surface: ScreenSurface, rect: SurfaceRect) {
-        let points = { (y: Float) in (y + 1) / 2 * layout.height }
-        let height = points(rect.top) - points(rect.bottom)
-        let strip = overheadSurface(
-            canvas: canvas, curveRadius: curveRadius, height: height, raised: points(rect.bottom))
-        guard canvas.spherical else { return (strip, SurfaceRect(left: rect.left, right: rect.right, top: 1, bottom: -1)) }
-        // On the sphere round the eyes, laid out as the canvas's rows are:
-        // its bottom edge runs level along the canvas's top edge, and every
-        // pixel faces the eyes, square. Mercator rows shrink by cos(rise), so
-        // the panel is drawn larger by as much at its middle.
-        let seen = { (point: SIMD3<Float>) -> (across: Float, rise: Float) in
-            let local = turn.inverse.act(point)
-            return (atan2(local.x, -local.z), atan2(local.y, simd_length(SIMD2(local.x, local.z))))
-        }
-        let across = seen(strip.point(at: SIMD2((rect.left + rect.right) / 2, 0))).across
-        let bottom = mercatorHeight(seen(strip.point(at: SIMD2((rect.left + rect.right) / 2, -1))).rise)
-        let perPoint = roomUnitsPerPixel / distance
-        let width = (rect.right - rect.left) / 2 * Float(canvas.width) * perPoint
-        var top = bottom + height * perPoint
-        for _ in 0..<4 {
-            top = bottom + height * perPoint / cos(mercatorRise((bottom + top) / 2))
-        }
-        let halfWidth = width / 2 / cos(mercatorRise((bottom + top) / 2))
-        // Across as an angle over π, up as the Mercator height itself.
-        let sphere = ScreenSurface(
-            center: SIMD3(0, 0, -distance), right: SIMD3(distance * .pi, 0, 0), up: SIMD3(0, distance, 0),
-            halfArc: .pi, spin: turn, wrap: 1)
-        return (
-            sphere,
-            SurfaceRect(left: (across - halfWidth) / .pi, right: (across + halfWidth) / .pi, top: top, bottom: bottom)
-        )
-    }
-    let dashboard = layout.dashboard.map(panel)
-    guard canvas.spherical, let window = layout.pinned else { return (dashboard, layout.pinned.map(panel)) }
-    // The pinned window is a monitor of its own: a small wrapped screen
-    // centred on its own middle and turned to face the eyes, curving round
-    // its middle as the canvas does round its own. Placed by angle, clear of
-    // the canvas below and of the dashboard beside it.
     let perPoint = roomUnitsPerPixel / distance
-    let halfWidth = (window.right - window.left) / 2 * Float(canvas.width) * roomUnitsPerPixel / 2
-    let halfHeight = (window.top - window.bottom) / 2 * layout.height * roomUnitsPerPixel / 2
-    let (acrossHalf, riseHalf) = (halfWidth / distance, halfHeight / distance)
-    let gap = overheadSpacing * perPoint
-    let base = panel(SurfaceRect(left: window.left, right: window.right, top: window.bottom + 0.01, bottom: window.bottom))
-    var across = base.rect.left * .pi + acrossHalf
-    var bottom = mercatorRise(base.rect.bottom)
-    if let board = dashboard?.rect, let under = layout.dashboard {
-        if window.left > under.right {
-            across = board.right * .pi + gap + acrossHalf
-        } else {
-            across = (board.left + board.right) / 2 * .pi
-            bottom = mercatorRise(board.top) + gap
-        }
+    let canvasSurface = canvas.surface(curveRadius: curveRadius)
+    func elevation(_ p: SIMD3<Float>) -> Float { atan2(p.y, length(SIMD2(p.x, p.z))) }
+    let edge = (0...128).map { step in
+        elevation(turn.inverse.act(canvasSurface.point(at: SIMD2(-1 + Float(step) / 64, 1))))
+    }.max() ?? 0
+    // The highest a panel may reach, short of straight overhead.
+    let ceiling: Float = 1.48
+    let gap = min(overheadGap * perPoint, max(ceiling - edge, 0.001) / 6)
+    let spacing = min(overheadSpacing * perPoint, gap)
+
+    func extent(_ rect: SurfaceRect) -> SIMD2<Float> {
+        SIMD2((rect.right - rect.left) * Float(canvas.width), (rect.top - rect.bottom) * layout.height) * perPoint / 4
     }
-    // Turned up to face the eyes, its bottom corners fall a little below its
-    // bottom middle; lifted by as much.
-    var rise = bottom + riseHalf
-    for _ in 0..<4 {
-        rise = bottom + riseHalf + acrossHalf * acrossHalf / 2 * tan(rise)
-    }
-    func monitor(across: Float) -> ScreenSurface {
+    let beside = layout.dashboard.map { board in layout.pinned.map { $0.left > board.right } ?? true } ?? true
+    let boardExtent = layout.dashboard.map(extent)
+    let windowExtent = layout.pinned.map(extent)
+    // Fit both panels uniformly, preserving their aspect ratios. A stacked
+    // pair shares the available height; a side-by-side pair shares its row.
+    let needed = beside
+        ? 2 * max(boardExtent?.y ?? 0, windowExtent?.y ?? 0)
+        : 2 * ((boardExtent?.y ?? 0) + (windowExtent?.y ?? 0)) + spacing
+    let widest = max(boardExtent?.x ?? 0, windowExtent?.x ?? 0)
+    let fit = min(1, max(ceiling - edge - 2 * gap, 0.001) / max(needed, 0.001), 0.9 / max(widest, 0.001))
+
+    func surface(half: SIMD2<Float>, across: Float, rise: Float) -> ScreenSurface {
         let forward = SIMD3(sin(across) * cos(rise), sin(rise), -cos(across) * cos(rise))
         let right = normalize(cross(forward, SIMD3(0, 1, 0)))
         let facing = simd_quatf(simd_float3x3(right, cross(right, forward), -forward))
         return ScreenSurface(
-            center: SIMD3(0, 0, -distance), right: SIMD3(halfWidth, 0, 0), up: SIMD3(0, halfHeight, 0),
-            halfArc: acrossHalf, spin: turn * facing, wrap: 1)
+            center: SIMD3(0, 0, -distance), right: SIMD3(half.x * distance, 0, 0), up: SIMD3(0, half.y * distance, 0),
+            halfArc: half.x, spin: turn * facing, wrap: 1)
     }
-    var placed = monitor(across: across)
-    // Its sides lean once it is turned up, so its corners come closer to the
-    // dashboard than its middle: moved over until all of its near side
-    // keeps the gap.
-    if let board = dashboard?.rect, let under = layout.dashboard, window.left > under.right {
-        let azimuth = { (point: SIMD3<Float>) -> Float in
-            let local = turn.inverse.act(point)
-            return atan2(local.x, -local.z)
+    func bounds(_ panel: ScreenSurface) -> (left: Float, right: Float, bottom: Float, top: Float) {
+        var result = (left: Float.infinity, right: -Float.infinity, bottom: Float.infinity, top: -Float.infinity)
+        for x in 0...16 {
+            for y in 0...16 {
+                let p = turn.inverse.act(panel.point(at: SIMD2(-1 + Float(x) / 8, -1 + Float(y) / 8)))
+                let a = atan2(p.x, -p.z)
+                let e = elevation(p)
+                result.left = min(result.left, a)
+                result.right = max(result.right, a)
+                result.bottom = min(result.bottom, e)
+                result.top = max(result.top, e)
+            }
         }
-        for _ in 0..<4 {
-            let nearest = [Float(-1), -0.5, 0, 0.5, 1].map { azimuth(placed.point(at: SIMD2(-1, $0))) }.min() ?? across
-            let short = board.right * .pi + gap - nearest
-            guard short > 1e-5 else { break }
-            across += short
-            placed = monitor(across: across)
-        }
+        return result
     }
-    return (dashboard, (placed, .whole))
+    func placed(_ extent: SIMD2<Float>, above bottom: Float, below top: Float) -> ScreenSurface {
+        var half = extent * fit
+        for _ in 0..<80 {
+            let latitude = mercatorRise(half.y)
+            // The bottom corners, not the centre of the bottom edge,
+            // determine clearance after the patch is tilted upwards.
+            let a = cos(latitude) * cos(half.x)
+            let b = sin(latitude)
+            let radius = sqrt(a * a + b * b)
+            if sin(bottom) < radius {
+                let rise = atan2(b, a) + asin(sin(bottom) / radius) + 1e-5
+                let azimuth = atan2(sin(half.x), cos(rise) * cos(half.x) - sin(rise) * tan(latitude))
+                if rise + latitude <= top && azimuth < 0.65 {
+                    return surface(half: half, across: 0, rise: rise)
+                }
+            }
+            half *= 0.9
+        }
+        return surface(half: half, across: 0, rise: bottom + mercatorRise(half.y))
+    }
+    let stackHeight = max(ceiling - edge - 2 * gap - spacing, 0.001)
+    let boardCeiling = !beside && windowExtent != nil
+        ? edge + gap + stackHeight * (boardExtent?.y ?? 0) / max((boardExtent?.y ?? 0) + (windowExtent?.y ?? 0), 0.001)
+        : ceiling
+    let board = boardExtent.map { placed($0, above: edge + gap, below: boardCeiling) }
+    let windowBottom = beside ? edge + gap : board.map { bounds($0).top + spacing } ?? edge + gap
+    var window = windowExtent.map { placed($0, above: windowBottom, below: ceiling) }
+    if beside, let board, let original = window {
+        // A yaw rotation preserves elevation, so this separation cannot
+        // undo clearance from the canvas or the ceiling.
+        let b = bounds(board)
+        let w = bounds(original)
+        let shift = b.right + spacing - w.left
+        var moved = original
+        moved.spin = turn * simd_quatf(angle: -shift, axis: SIMD3(0, 1, 0)) * turn.inverse * original.spin
+        window = moved
+    }
+    return (board.map { ($0, .whole) }, window.map { ($0, .whole) })
 }
 
 /// Where a pointer image `size` points large, with its hot spot `hotSpot`
@@ -227,4 +238,3 @@ public func pointerRect(canvas: RoomScreen, at point: SIMD2<Float>, size: SIMD2<
     return SurfaceRect(
         left: topLeft.x * 2 - 1, right: bottomRight.x * 2 - 1, top: 1 - topLeft.y * 2, bottom: 1 - bottomRight.y * 2)
 }
-

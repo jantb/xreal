@@ -91,15 +91,24 @@ func image(of bitmap: Data, width: Int, height: Int, device: MTLDevice) -> Captu
 }
 
 /// A window that can be pinned above the canvas, as the controls list it.
-struct PinnableWindow: Hashable, Sendable {
+struct PinnableWindow: Hashable, Identifiable, Sendable {
+    var id: CGWindowID
     var window: PinnedWindow
-    var label: String
+    var appName: String
+    var width: Int
+    var height: Int
+
+    var label: String { "\(appName) – \(window.title)" }
+
+    func matches(_ query: String) -> Bool {
+        query.isEmpty || label.localizedStandardContains(query)
+    }
 }
 
 extension ScreenCapture {
     /// Windows worth pinning: ordinary, titled, on screen, not this app's.
-    static func pinnableWindows() async -> [PinnableWindow] {
-        guard let content = try? await content() else { return [] }
+    static func pinnableWindows() async throws -> [PinnableWindow] {
+        let content = try await content()
         let own = Bundle.main.bundleIdentifier
         return content.windows.compactMap { window -> PinnableWindow? in
             guard window.windowLayer == 0, window.isOnScreen, let title = window.title, !title.isEmpty,
@@ -107,19 +116,32 @@ extension ScreenCapture {
                 let app = window.owningApplication, app.bundleIdentifier != own, !app.bundleIdentifier.isEmpty
             else { return nil }
             return PinnableWindow(
+                id: window.windowID,
                 window: PinnedWindow(bundleID: app.bundleIdentifier, title: title),
-                label: "\(app.applicationName) – \(title)")
+                appName: app.applicationName, width: Int(window.frame.width), height: Int(window.frame.height))
         }
         .sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending }
     }
 
-    /// The window `pinned` names in `content`: the app's window with that
-    /// title, or else its first ordinary one, as titles change.
-    static func find(_ pinned: PinnedWindow, in content: SCShareableContent) -> SCWindow? {
+    /// Preserve a live selection across title changes. After reopening,
+    /// only an unambiguous title match may replace it.
+    static func find(_ pinned: PinnedWindow, in content: SCShareableContent, preferredID: CGWindowID? = nil) -> SCWindow? {
         let windows = content.windows.filter {
             $0.owningApplication?.bundleIdentifier == pinned.bundleID && $0.windowLayer == 0
                 && $0.frame.width >= 50 && $0.frame.height >= 50
         }
-        return windows.first { $0.title == pinned.title } ?? windows.first { $0.isOnScreen } ?? windows.first
+        let choices = windows.map {
+            PinnableWindow(id: $0.windowID, window: PinnedWindow(bundleID: pinned.bundleID, title: $0.title ?? ""),
+                           appName: "", width: Int($0.frame.width), height: Int($0.frame.height))
+        }
+        guard let id = pinnedWindowID(for: pinned, preferredID: preferredID, choices: choices) else { return nil }
+        return windows.first { $0.windowID == id }
     }
+}
+
+func pinnedWindowID(for wanted: PinnedWindow, preferredID: CGWindowID?, choices: [PinnableWindow]) -> CGWindowID? {
+    let sameApp = choices.filter { $0.window.bundleID == wanted.bundleID }
+    if let preferredID, sameApp.contains(where: { $0.id == preferredID }) { return preferredID }
+    let exact = sameApp.filter { $0.window.title == wanted.title }
+    return exact.count == 1 ? exact[0].id : nil
 }

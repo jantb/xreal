@@ -140,6 +140,8 @@ enum ViewerCommand {
     case toggleLivePointer
     case toggleStatusStrip
     case setPinnedWindow(PinnedWindow?)
+    /// Pins one window of those listed, even among several with its title.
+    case pinWindow(PinnableWindow)
     case window(WindowCommand)
 }
 
@@ -200,6 +202,12 @@ struct ViewerState: Sendable {
     var sourceSize: (width: Int, height: Int)?
     var output = (width: 0, height: 0)
     var newFrame = false
+    /// The overhead panels as last laid out, facing straight ahead: they
+    /// only move with the canvas's size and distance, not every frame.
+    private var overheadCache: (
+        canvas: RoomScreen, curveRadius: Float, layout: OverheadLayout,
+        dashboard: (surface: ScreenSurface, rect: SurfaceRect)?, pinned: (surface: ScreenSurface, rect: SurfaceRect)?
+    )?
 
     init(settings: Settings) {
         self.settings = settings
@@ -392,7 +400,7 @@ struct ViewerState: Sendable {
         let overhead = overheadLayout(
             canvas: canvas, dashboard: settings.statusStrip ? extras.status : nil, pinned: extras.pinned)
         if overhead.height > 0 {
-            let row = overheadPanels(canvas: canvas, curveRadius: curveRadius, layout: overhead)
+            let row = overheadViews(canvas: canvas, curveRadius: curveRadius, layout: overhead)
             if let dashboard = row.dashboard {
                 room.panels.append(RoomView.Panel(source: .status, surface: dashboard.surface, rect: dashboard.rect))
             }
@@ -406,6 +414,25 @@ struct ViewerState: Sendable {
             room.panels.append(RoomView.Panel(source: .pointer, surface: surface, rect: rect))
         }
         return room
+    }
+
+    /// Layout depends on size and distance, not on the head pose or the
+    /// canvas's orientation. Keep the clearance solver off the frame path.
+    private mutating func overheadViews(canvas: RoomScreen, curveRadius: Float, layout: OverheadLayout)
+        -> (dashboard: (surface: ScreenSurface, rect: SurfaceRect)?, pinned: (surface: ScreenSurface, rect: SurfaceRect)?)
+    {
+        var local = canvas
+        local.placement = ScreenPlacement(direction: SIMD3(0, 0, -1), distance: canvas.placement.distance)
+        if overheadCache.map({ $0.canvas != local || $0.curveRadius != curveRadius || $0.layout != layout }) ?? true {
+            let panels = overheadPanels(canvas: local, curveRadius: curveRadius, layout: layout)
+            overheadCache = (local, curveRadius, layout, panels.dashboard, panels.pinned)
+        }
+        func oriented(_ panel: (surface: ScreenSurface, rect: SurfaceRect)?) -> (surface: ScreenSurface, rect: SurfaceRect)? {
+            guard var panel else { return nil }
+            panel.surface.spin = canvas.placement.orientation * panel.surface.spin
+            return panel
+        }
+        return (oriented(overheadCache?.dashboard), oriented(overheadCache?.pinned))
     }
 
     /// Where the mouse at `point`, in global coordinates, is on the canvas,
@@ -599,6 +626,12 @@ final class FrameLoop: @unchecked Sendable {
     /// The window being pinned and its size in points.
     private var pinnedTarget: (id: CGWindowID, size: CGSize)?
     private var pinnedTask: Task<Void, Never>?
+    /// The window chosen in the controls, which the pinned window follows
+    /// while its title changes; nil to go by the saved app and title.
+    private(set) var preferredPinnedWindowID: CGWindowID?
+    /// Why the pinned window is not shown, for the controls.
+    private(set) var pinnedWindowStatus: String?
+    private var settingsSaveTask: Task<Void, Never>?
     private let laptopScreen = LaptopScreen()
 
     init(settings: Settings) throws {
@@ -692,6 +725,7 @@ final class FrameLoop: @unchecked Sendable {
     }
 
     func saveSettings() {
+        settingsSaveTask?.cancel()
         timingLog.notice("Saving settings")
         let bias = tracking.snapshot().thermalBias
         let settings = shared.mutex.withLock { state in
@@ -715,6 +749,7 @@ final class FrameLoop: @unchecked Sendable {
             controlWindows(windowCommand)
             return
         }
+        let preferredID = preferredPinnedWindowID
         shared.mutex.withLock { state in
             switch command {
             case .recenter:
@@ -775,17 +810,26 @@ final class FrameLoop: @unchecked Sendable {
                 repin = pinned != state.settings.pinnedWindow
                 state.settings.pinnedWindow = pinned
                 persist = repin
+            case .pinWindow(let choice):
+                repin = choice.id != preferredID || choice.window != state.settings.pinnedWindow
+                state.settings.pinnedWindow = choice.window
+                persist = repin
             case .window:
                 break
             }
         }
         if persist {
-            saveSettings()
+            scheduleSettingsSave()
         }
         if restartSource {
             startSource()
         }
         if repin {
+            if case .pinWindow(let choice) = command {
+                preferredPinnedWindowID = choice.id
+            } else {
+                preferredPinnedWindowID = nil
+            }
             restartPinned()
         }
         switch command {
@@ -796,9 +840,17 @@ final class FrameLoop: @unchecked Sendable {
         }
     }
 
+    private func scheduleSettingsSave() {
+        settingsSaveTask?.cancel()
+        settingsSaveTask = Task {
+            do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+            saveSettings()
+        }
+    }
+
     /// Windows that can be pinned above the canvas, for the controls.
-    func pinnableWindows() async -> [PinnableWindow] {
-        await ScreenCapture.pinnableWindows()
+    func pinnableWindows() async throws -> [PinnableWindow] {
+        try await ScreenCapture.pinnableWindows()
     }
 
     private func screensChanged() {
@@ -1153,17 +1205,26 @@ final class FrameLoop: @unchecked Sendable {
 
     /// Captures the pinned window, if there is one to show.
     private func switchPinned() async {
+        pinnedWindowStatus = nil
         if let old = pinnedCapture {
             pinnedCapture = nil
             await old.stop()
         }
+        guard !Task.isCancelled else { return }
         pinnedTarget = nil
         shared.mutex.withLock { $0.pinned = nil }
-        guard let wanted = shared.mutex.withLock({ $0.settings.pinnedWindow }), Displays.glassesDisplay() != nil,
-            let content = try? await ScreenCapture.content(), !Task.isCancelled,
-            let found = ScreenCapture.find(wanted, in: content)
-        else { return }
+        guard let wanted = shared.mutex.withLock({ $0.settings.pinnedWindow }) else { return }
+        guard Displays.glassesDisplay() != nil else {
+            pinnedWindowStatus = "Connect the glasses to show this window."
+            return
+        }
         do {
+            let content = try await ScreenCapture.content()
+            guard !Task.isCancelled else { return }
+            guard let found = ScreenCapture.find(wanted, in: content, preferredID: preferredPinnedWindowID) else {
+                pinnedWindowStatus = "Window unavailable or ambiguous. Open it or choose a window again."
+                return
+            }
             let capture = try ScreenCapture(device: device)
             try await capture.start(window: found, fps: pinnedFps, maxPixels: maxPinnedPixels)
             guard !Task.isCancelled else {
@@ -1171,9 +1232,12 @@ final class FrameLoop: @unchecked Sendable {
                 return
             }
             pinnedCapture = capture
+            preferredPinnedWindowID = found.windowID
             pinnedTarget = (found.windowID, found.frame.size)
             shared.mutex.withLock { $0.pinned = capture.latest }
         } catch {
+            guard !Task.isCancelled else { return }
+            pinnedWindowStatus = "Could not capture the window: \(error.localizedDescription)"
             eprint("Could not capture the pinned window: \(error.localizedDescription)")
         }
     }
@@ -1194,8 +1258,11 @@ final class FrameLoop: @unchecked Sendable {
             return
         }
         if frame.size != target.size {
-            pinnedTarget = (target.id, frame.size)
-            Task { await capture.resizeWindow(to: frame.size) }
+            Task {
+                if await capture.resizeWindow(to: frame.size), capture === pinnedCapture {
+                    pinnedTarget = (target.id, frame.size)
+                }
+            }
         }
     }
 

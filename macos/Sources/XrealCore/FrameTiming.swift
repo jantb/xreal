@@ -29,6 +29,8 @@ public struct FrameTiming: Sendable {
     /// The time from sampling the pose to the frame reaching the display,
     /// for the latest frame that did.
     public private(set) var lastLead: Double?
+    public private(set) var workMedian: Double?
+    public private(set) var workP95: Double?
 
     public init() {}
 
@@ -55,6 +57,10 @@ public struct FrameTiming: Sendable {
     public mutating func worked(_ seconds: Double, period: Double) {
         Self.append(max(seconds, 0), to: &work)
         let typical = work.count >= minTimedFrames ? Self.percentile(work, 0.95) : 0
+        if work.count >= minTimedFrames {
+            workMedian = Self.percentile(work, 0.5)
+            workP95 = typical
+        }
         workBudget = min(max(typical + workMargin, minWorkBudget), period * 0.7)
     }
 

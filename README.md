@@ -65,6 +65,15 @@ busiest apps, the glasses and latency), and beside it, if you pick one in the
 controls, a pinned window from any app. The pinned window can stay anywhere,
 even on the glasses' own display behind the view.
 
+**Pinned Window > Choose…** lists windows by app and title, with their
+sizes, so windows with the same title can be told apart. The pinned window
+follows its window while its title changes. After a restart it reconnects
+only when the saved app and title match exactly one window; otherwise the
+controls say it is unavailable rather than showing another one. Over a
+wrapped canvas the dashboard and pinned window curve round the eyes like
+the canvas and keep clear of it and of each other; otherwise they are flat
+panels tilted to face you.
+
 ## Latency
 
 The viewer measures when each frame really reaches the glasses and predicts
