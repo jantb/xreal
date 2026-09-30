@@ -96,39 +96,70 @@ private let shaderSource = """
         return out;
     }
 
-    // The glow round the canvas: light thrown by what is on the canvas near
-    // its edge, from the small blurred copy of it. Farther out, the light
-    // comes from a wider patch farther in, as light spreads, so it softens
-    // and blends without copying shapes. Brightest at the edge, it fades out
-    // smoothly over `halo.z` points. Light only, added to what is behind.
+    // `source` at mip level `mip`, filtered with a cubic B-spline from four
+    // bilinear samples: smooth to its second derivative, where bilinear
+    // filtering of a small level shows its texels as straight ramps with
+    // kinks between them, which look like bands.
+    float4 sampleSpline(texture2d<float> source, sampler linear, float2 uv, uint mip) {
+        float2 size = float2(source.get_width(mip), source.get_height(mip));
+        float2 position = uv * size - 0.5;
+        float2 first = floor(position);
+        float2 f = position - first;
+        float2 w0 = (1 - f) * (1 - f) * (1 - f) / 6;
+        float2 w1 = (4 - 6 * f * f + 3 * f * f * f) / 6;
+        float2 w2 = (1 + 3 * f + 3 * f * f - 3 * f * f * f) / 6;
+        float2 w3 = f * f * f / 6;
+        float2 g0 = w0 + w1;
+        float2 g1 = w2 + w3;
+        float2 at0 = (first + 0.5 - 1 + w1 / g0) / size;
+        float2 at1 = (first + 0.5 + 1 + w3 / g1) / size;
+        float lod = float(mip);
+        return g0.x * g0.y * source.sample(linear, float2(at0.x, at0.y), level(lod))
+            + g1.x * g0.y * source.sample(linear, float2(at1.x, at0.y), level(lod))
+            + g0.x * g1.y * source.sample(linear, float2(at0.x, at1.y), level(lod))
+            + g1.x * g1.y * source.sample(linear, float2(at1.x, at1.y), level(lod));
+    }
+
+    // The glow round the canvas: what is on the canvas near its edge,
+    // mirrored out past it, like the canvas reflected in a dark, frosted
+    // mirror: sharpest at the edge, blurrier farther out, where it shows
+    // the canvas twice as far in, and fading evenly to the eye to black
+    // over `halo.z` points. Read from the small copy of the canvas, divided
+    // by how much of what it blurs is canvas, so the margin round it never
+    // darkens it. Light only, added to what is behind.
     fragment float4 haloFragment(PanelOut in [[stage_in]],
                                  constant Panel &panel [[buffer(0)]],
                                  texture2d<float> ambient [[texture(0)]]) {
-        constexpr sampler blurred(filter::linear, mip_filter::linear, address::clamp_to_edge);
+        constexpr sampler blurred(filter::linear, mip_filter::nearest, address::clamp_to_edge);
         float2 inside = clamp(in.screenUV, 0.0, 1.0);
-        float2 past = (in.screenUV - inside) * panel.halo.xy;  // points
-        float away = length(past);
+        float2 past = in.screenUV - inside;
+        float away = length(past * panel.halo.xy);  // points
         float reach = away / panel.halo.z;
         if (reach >= 1) {
             return float4(0);
         }
-        // The patches the light comes from, in points: each as wide as its
-        // middle is far in from the nearest point of the edge. Even right
-        // at the edge, light comes from well inside, or a dark border
-        // would throw a shadow round the canvas.
-        float2 inward = away > 1e-3 ? -past / away : float2(0);
-        float texel = panel.halo.x / float(ambient.get_width());
-        float3 light = 0;
-        for (int wide = 0; wide < 2; wide++) {
-            float patch = (wide == 0 ? 120 : 300) + 0.8 * away;
-            float2 from = clamp(inside + inward * patch / panel.halo.xy, 0.0, 1.0);
-            light += 0.5 * ambient.sample(blurred, from, level(max(log2(patch / texel), 0.0))).rgb;
-        }
+        float2 margin = panel.halo.z / panel.halo.xy;
+        float2 mirrored = clamp(inside - 2 * past, 0.0, 1.0);
+        float2 inCopy = (mirrored + margin) / (1 + 2 * margin);
+        float texel = (panel.halo.x + 2 * panel.halo.z) / float(ambient.get_width());
+        float top = float(ambient.get_num_mip_levels() - 1);
+        // How widely it is blurred, in points; a level finer than that, as
+        // the spline blurs it further, and between two levels both, so it
+        // does not step.
+        float spread = 40 + 1.2 * away;
+        float lod = clamp(log2(spread / texel) - 1, 0.0, top);
+        uint lower = uint(floor(lod));
+        uint upper = min(lower + 1, uint(top));
+        float4 seen = mix(sampleSpline(ambient, blurred, inCopy, lower),
+            sampleSpline(ambient, blurred, inCopy, upper), fract(lod));
+        float3 light = seen.rgb / max(seen.a, 1e-3);
         // A little more colourful than the canvas, as a glow reads paler.
         float grey = dot(light, float3(0.2126, 0.7152, 0.0722));
         light = max(mix(float3(grey), light, 1.25), 0.0);
-        float fall = exp(-2.5 * reach) * (1 - reach * reach) * (1 - reach * reach);
-        light *= fall * panel.halo.w;
+        // Even to the eye: the fade is shaped in the output's gamma, not in
+        // linear light, where it would stay bright and then drop off.
+        float fade = 1 - smoothstep(0.0, 1.0, reach);
+        light *= pow(fade, 2.2) * panel.halo.w;
         // Dithered by up to a step either way of the 8-bit output, with
         // triangular noise from two patterns, so the long dark gradient
         // shows no bands.
@@ -139,30 +170,46 @@ private let shaderSource = """
         return float4(pow(max(encoded, 0.0), 2.2), 0);
     }
 
-    // The small blurred copy of the canvas the glow takes its colours from:
-    // one quad per capture tile, span.xy its part of the canvas's width and
-    // span.zw the copy's size in pixels.
+    // The small blurred copy of the canvas the glow takes its light from,
+    // with a black margin round it as wide as the glow reaches, for the
+    // blur to spill the canvas's light into. One quad per capture tile, and
+    // the margin above and below it and, at the canvas's ends, beside it.
+    // ambient[0]: xy the tile's part of the canvas's width, zw the copy's
+    // size in pixels; ambient[1]: xy the margin as a share of the canvas's
+    // width and height, zw 1 where the tile is the canvas's left or right end.
     struct AmbientOut {
         float4 position [[position]];
     };
 
-    vertex AmbientOut ambientVertex(uint id [[vertex_id]], constant float4 &span [[buffer(0)]]) {
+    vertex AmbientOut ambientVertex(uint id [[vertex_id]], constant float4 *ambient [[buffer(0)]]) {
+        float4 span = ambient[0];
+        float4 margin = ambient[1];
         float2 corner = float2(id & 1, id >> 1);
+        float left = margin.z > 0.5 ? -margin.x : span.x;
+        float right = margin.w > 0.5 ? 1 + margin.x : span.y;
+        float2 onCanvas = float2(mix(left, right, corner.x), mix(-margin.y, 1 + margin.y, corner.y));
+        float2 inCopy = (onCanvas + margin.xy) / (1 + 2 * margin.xy);
         AmbientOut out;
-        out.position = float4(mix(span.x, span.y, corner.x) * 2 - 1, 1 - corner.y * 2, 0, 1);
+        out.position = float4(inCopy.x * 2 - 1, 1 - inCopy.y * 2, 0, 1);
         return out;
     }
 
     // Each pixel of the copy averages the tile over about three of its own
-    // pixels each way, so the glow is smooth.
+    // pixels each way, so the glow is smooth; alpha says it is canvas. The
+    // margin is black and clear.
     fragment float4 ambientFragment(AmbientOut in [[stage_in]],
-                                    constant float4 &span [[buffer(0)]],
+                                    constant float4 *ambient [[buffer(0)]],
                                     texture2d<float> source [[texture(0)]],
                                     sampler linear [[sampler(0)]]) {
-        float2 onCanvas = in.position.xy / span.zw;
+        float4 span = ambient[0];
+        float4 margin = ambient[1];
+        float2 onCanvas = in.position.xy / span.zw * (1 + 2 * margin.xy) - margin.xy;
+        if (any(onCanvas < 0.0) || any(onCanvas > 1.0)) {
+            return float4(0);
+        }
         float width = max(span.y - span.x, 1e-4);
         float2 uv = float2((onCanvas.x - span.x) / width, onCanvas.y);
-        float2 texel = float2(1 / (span.z * width), 1 / span.w);
+        float2 texel = (1 + 2 * margin.xy) / span.zw / float2(width, 1);
         float3 sum = 0;
         for (int i = 0; i < 8; i++) {
             for (int j = 0; j < 8; j++) {
@@ -284,9 +331,9 @@ private let shaderSource = """
     }
     """
 
-// The small blurred copy of the canvas the glow round it takes its colours
-// from, in pixels.
-private let ambientSize = SIMD2<Float>(256, 96)
+// The small blurred copy of the canvas, with the margin round it, that the
+// glow round it takes its colours from, in pixels.
+private let ambientSize = SIMD2<Float>(320, 144)
 // How far out from the middle of each eye's view the arrow pointing back
 // to the canvas sits, as a share of the way to the edge, and half its
 // length in pixels.
@@ -346,6 +393,9 @@ final class Renderer: @unchecked Sendable {
     private let arrowPipeline: MTLRenderPipelineState
     private var ambient: MTLTexture?
     private var ambientStarted = false
+    /// What the copy was last drawn from: each tile's part and the margin.
+    /// Laid out differently, it starts afresh, or old light would linger.
+    private var ambientLayout: [SIMD4<Float>] = []
     private let sampler: MTLSamplerState
     // Match the drawable size; recreated when that changes.
     private var sampled: (color: MTLTexture, depth: MTLTexture)?
@@ -390,13 +440,14 @@ final class Renderer: @unchecked Sendable {
         // eight bits would stop short in steps, and the glow show bands.
         ambientDescriptor.colorAttachments[0].pixelFormat = .rgba16Float
         // Each frame moves the copy a fifth of the way to the canvas, so the
-        // glow drifts rather than flickers.
+        // glow drifts rather than flickers; how much of it is canvas moves
+        // with its colour, so the two stay in step.
         let ease = ambientDescriptor.colorAttachments[0]!
         ease.isBlendingEnabled = true
         ease.sourceRGBBlendFactor = .blendColor
         ease.destinationRGBBlendFactor = .oneMinusBlendColor
-        ease.sourceAlphaBlendFactor = .one
-        ease.destinationAlphaBlendFactor = .zero
+        ease.sourceAlphaBlendFactor = .blendAlpha
+        ease.destinationAlphaBlendFactor = .oneMinusBlendAlpha
         ambientPipeline = try device.makeRenderPipelineState(descriptor: ambientDescriptor)
         let ambientTexture = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba16Float, width: Int(ambientSize.x), height: Int(ambientSize.y), mipmapped: true)
@@ -504,23 +555,41 @@ final class Renderer: @unchecked Sendable {
     /// canvas shows now.
     private func drawAmbient(from room: RoomView, images: PanelImages, into commandBuffer: MTLCommandBuffer) {
         guard let ambient else { return }
+        // The margin round the canvas, as wide as the glow reaches.
+        let halo = room.panels.first { $0.source == .ambient }?.halo ?? .zero
+        let margin = halo.x > 0 && halo.y > 0 ? SIMD2(halo.z / halo.x, halo.z / halo.y) : .zero
+        let tiles = room.panels.compactMap { panel -> (MTLTexture, [SIMD4<Float>])? in
+            guard let tile = panel.tile, tile < images.canvas.count, let image = images.canvas[tile] else { return nil }
+            return (
+                image.texture,
+                [
+                    SIMD4<Float>((panel.rect.left + 1) / 2, (panel.rect.right + 1) / 2, ambientSize.x, ambientSize.y),
+                    SIMD4(margin.x, margin.y, panel.rect.left <= -1 + 1e-4 ? 1 : 0, panel.rect.right >= 1 - 1e-4 ? 1 : 0),
+                ]
+            )
+        }
+        let layout = tiles.flatMap(\.1)
+        if layout != ambientLayout {
+            ambientLayout = layout
+            ambientStarted = false
+        }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = ambient
         pass.colorAttachments[0].loadAction = ambientStarted ? .load : .clear
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         pass.colorAttachments[0].storeAction = .store
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
         encoder.setRenderPipelineState(ambientPipeline)
         encoder.setFragmentSamplerState(sampler, index: 0)
         // The first frame fills it straight away.
         let step: Float = ambientStarted ? 0.2 : 1
-        encoder.setBlendColor(red: step, green: step, blue: step, alpha: 1)
-        for panel in room.panels {
-            guard let tile = panel.tile, tile < images.canvas.count, let image = images.canvas[tile] else { continue }
-            var span = SIMD4<Float>((panel.rect.left + 1) / 2, (panel.rect.right + 1) / 2, ambientSize.x, ambientSize.y)
-            encoder.setVertexBytes(&span, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
-            encoder.setFragmentBytes(&span, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
-            encoder.setFragmentTexture(image.texture, index: 0)
+        encoder.setBlendColor(red: step, green: step, blue: step, alpha: step)
+        for (texture, spans) in tiles {
+            var ambient = spans
+            let length = MemoryLayout<SIMD4<Float>>.stride * ambient.count
+            encoder.setVertexBytes(&ambient, length: length, index: 0)
+            encoder.setFragmentBytes(&ambient, length: length, index: 0)
+            encoder.setFragmentTexture(texture, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
         encoder.endEncoding()

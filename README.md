@@ -56,9 +56,9 @@ sphere. **Even Out Text Size** shares that shrinking out, a little
 larger in the middle and a little smaller at the edges. Edges are drawn
 smooth (four samples a pixel) and fade softly into the room (**Soft
 Edges**). **Viewing Distance** starts at, and snaps to, the 4 m where the
-glasses' optics focus, so the eyes aim and focus at the same distance. **Ambient Light** lights the room round the canvas with
-the light of what is on it near its edges, softer and from farther in the
-farther out it reaches, like a TV's backlight.
+glasses' optics focus, so the eyes aim and focus at the same distance. **Ambient Light** mirrors what is on the canvas near its
+edges out into the room, blurrier and dimmer the farther out, fading evenly
+to black, like a TV's backlight on a glossy wall.
 
 Above the canvas, where you see it by looking up, hangs a row tilted to face
 you: a dashboard updated ten times a second (time and thermal state, CPU per
