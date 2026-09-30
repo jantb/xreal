@@ -243,7 +243,7 @@ final class Dashboard: @unchecked Sendable {
             tiles.append(
                 Tile(
                     title: "Power", color: Palette.power, value: String(format: "%.1f W", power.system),
-                    detail: power.usbOut > 0.05 ? String(format: "USB out %.1f W", power.usbOut) : "system",
+                    detail: powerText(power),
                     graphs: [.sparkline([(sample.powerHistory.values, Palette.power)], ceiling: peak)]))
         }
         tiles.append(
@@ -282,6 +282,15 @@ final class Dashboard: @unchecked Sendable {
         case ..<1_048_576: String(format: "%.0f KB/s", bytesPerSecond / 1024)
         default: String(format: "%.1f MB/s", bytesPerSecond / 1_048_576)
         }
+    }
+
+    private func powerText(_ power: PowerUse) -> String {
+        let usb = power.usbOut > 0.05 ? power.usbOut : nil
+        if let charging = power.charging {
+            let text = String(format: "Charging %.0f W", charging)
+            return usb.map { text + String(format: " · USB %.1f W", $0) } ?? text
+        }
+        return usb.map { String(format: "USB out %.1f W", $0) } ?? "system"
     }
 
     private func batteryText(_ battery: Battery) -> String {

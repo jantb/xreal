@@ -230,37 +230,52 @@ public struct DiskCounters: Equatable, Sendable {
     }
 }
 
-/// Power the Mac draws, and what its USB-C ports give out, such as to the
-/// glasses, in watts, as a laptop's power controller reports them.
+/// Power the Mac draws, what its USB-C ports give out, such as to the
+/// glasses, and what goes into the battery while it charges, in watts, as a
+/// laptop's power controller reports them.
 public struct PowerUse: Equatable, Sendable {
     public var system: Float
     public var usbOut: Float
+    /// Into the battery, while it charges; nil when it is not charging.
+    public var charging: Float?
 
-    public init(system: Float, usbOut: Float) {
+    public init(system: Float, usbOut: Float, charging: Float? = nil) {
         self.system = system
         self.usbOut = usbOut
+        self.charging = charging
     }
 
     public static func now() -> PowerUse? {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
         guard service != 0 else { return nil }
         defer { IOObjectRelease(service) }
-        func property(_ name: String) -> Any? {
-            IORegistryEntryCreateCFProperty(service, name as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()
+        var properties: [String: Any] = [:]
+        for name in ["PowerTelemetryData", "Voltage", "InstantAmperage", "PowerOutDetails", "IsCharging"] {
+            properties[name] = IORegistryEntryCreateCFProperty(service, name as CFString, kCFAllocatorDefault, 0)?
+                .takeRetainedValue()
         }
-        let telemetry = property("PowerTelemetryData") as? [String: Any]
+        return PowerUse(properties: properties)
+    }
+
+    /// From the power controller's properties: millivolts, milliamps and
+    /// milliwatts, the current negative while the battery runs the Mac.
+    public init?(properties: [String: Any]) {
+        let telemetry = properties["PowerTelemetryData"] as? [String: Any]
+        let volts = (properties["Voltage"] as? NSNumber).map { $0.floatValue / 1000 }
+        let amps = (properties["InstantAmperage"] as? NSNumber).map { Float($0.int64Value) / 1000 }
         var system = (telemetry?["SystemLoad"] as? NSNumber).map { $0.floatValue / 1000 }
-        if system == nil || system == 0,
-            let volts = (property("Voltage") as? NSNumber)?.floatValue,
-            let amps = (property("InstantAmperage") as? NSNumber)?.int64Value, amps < 0
-        {
+        if system == nil || system == 0, let volts, let amps, amps < 0 {
             // Running on the battery: what leaves it.
-            system = volts / 1000 * Float(-amps) / 1000
+            system = volts * -amps
         }
         guard let system, system > 0 else { return nil }
-        let ports = property("PowerOutDetails") as? [[String: Any]] ?? []
+        let ports = properties["PowerOutDetails"] as? [[String: Any]] ?? []
         let out = ports.reduce(Float(0)) { $0 + (($1["Watts"] as? NSNumber)?.floatValue ?? 0) / 1000 }
-        return PowerUse(system: system, usbOut: out)
+        var charging: Float?
+        if (properties["IsCharging"] as? Bool) == true, let volts, let amps, amps > 0 {
+            charging = volts * amps
+        }
+        self.init(system: system, usbOut: out, charging: charging)
     }
 }
 
