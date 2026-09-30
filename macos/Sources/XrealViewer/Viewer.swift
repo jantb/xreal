@@ -806,6 +806,11 @@ final class FrameLoop: @unchecked Sendable {
         if connected != glassesConnected {
             glassesConnected = connected
             eprint(connected ? "The glasses are connected" : "The glasses were disconnected")
+            if !connected {
+                // At once, before the canvas goes: with the laptop's screen
+                // off, it is the only display left.
+                updateLaptopScreen()
+            }
             startSource()
             restartPinned()
         }
@@ -1024,10 +1029,11 @@ final class FrameLoop: @unchecked Sendable {
         // Without the glasses there is nothing to show: no canvas, no
         // capture, no window.
         guard Displays.glassesDisplay() != nil else {
+            // The laptop's screen comes back on before the canvas goes.
+            updateLaptopScreen()
             canvasScreen = nil
             setSource(.noGlasses, captures: [])
             window.hide()
-            updateLaptopScreen()
             return
         }
         window.place()
