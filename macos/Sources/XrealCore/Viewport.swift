@@ -48,14 +48,11 @@ public struct ViewportController: Sendable {
     private var offsetPitch: Float = 0
     private var offsetRoll: Float = 0
     private var initialized = false
+    /// Whether the view tilts with the head, as `Settings.followRoll` says.
     public var followsRoll: Bool
 
     public init(settings: Settings) {
         followsRoll = settings.followRoll
-    }
-
-    public func store(into settings: inout Settings) {
-        settings.followRoll = followsRoll
     }
 
     /// Makes `pose` the new straight ahead. Only the turn and nod are

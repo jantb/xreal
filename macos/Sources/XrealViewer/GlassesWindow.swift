@@ -57,13 +57,6 @@ enum Displays {
         CGGetActiveDisplayList(UInt32(ids.count), &ids, &count)
         return Array(ids.prefix(Int(count)))
     }
-
-    static func pixelSize(of id: CGDirectDisplayID) -> (width: Int, height: Int) {
-        guard let mode = CGDisplayCopyDisplayMode(id) else {
-            return (CGDisplayPixelsWide(id), CGDisplayPixelsHigh(id))
-        }
-        return (mode.pixelWidth, mode.pixelHeight)
-    }
 }
 
 extension NSScreen {
@@ -72,17 +65,10 @@ extension NSScreen {
     }
 }
 
-/// Borderless windows cannot take keyboard focus unless they opt in.
-private final class KeyWindow: NSWindow {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
-}
-
 /// A view backed by an opaque CAMetalLayer. Nothing is drawn over it, so the
 /// window server can show the layer without compositing it.
 final class MetalView: NSView {
     let metalLayer = CAMetalLayer()
-    var onKey: ((NSEvent) -> Void)?
 
     init(device: MTLDevice) {
         super.init(frame: .zero)
@@ -99,9 +85,7 @@ final class MetalView: NSView {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func makeBackingLayer() -> CALayer { metalLayer }
-    override var acceptsFirstResponder: Bool { true }
     override var isOpaque: Bool { true }
-    override func keyDown(with event: NSEvent) { onKey?(event) }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -130,11 +114,13 @@ final class MetalView: NSView {
     let view: MetalView
     private let window: NSWindow
     private let displayLink: DisplayLinkThread
+    /// The screen and rate the display link runs for.
+    private var linked: (display: CGDirectDisplayID, fps: Int)?
 
     init(device: MTLDevice, displayLink: DisplayLinkThread) {
         self.displayLink = displayLink
         view = MetalView(device: device)
-        window = KeyWindow(
+        window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 960, height: 540),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "XREAL Viewer"
@@ -149,20 +135,15 @@ final class MetalView: NSView {
         CGWindowID(window.windowNumber)
     }
 
-    /// Puts the window full screen on the glasses, taking the keyboard.
-    func show() {
-        place()
-        guard Displays.glassesScreen() != nil else { return }
-        window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(view)
-    }
-
     func hide() {
         window.orderOut(nil)
+        // The glasses may come back as a new screen.
+        linked = nil
     }
 
-    /// Moves the window onto the glasses, or out of sight when they are not
-    /// connected.
+    /// Moves the window full screen onto the glasses, or out of sight when
+    /// they are not connected. It never takes the keyboard, which stays with
+    /// the app being worked in.
     func place() {
         guard let screen = Displays.glassesScreen() else {
             hide()
@@ -173,7 +154,12 @@ final class MetalView: NSView {
         window.level = .statusBar
         window.setFrame(screen.frame, display: true)
         window.orderFrontRegardless()
-        // Recreated so the link runs at the refresh rate of this screen.
-        displayLink.attach(to: view.metalLayer, fps: screen.maximumFramesPerSecond)
+        // Recreated so the link runs at the refresh rate of this screen,
+        // only when that changes: recreating it drops frames.
+        let wanted = (display: screen.displayID ?? 0, fps: screen.maximumFramesPerSecond)
+        if linked.map({ $0 != wanted }) ?? true {
+            linked = wanted
+            displayLink.attach(to: view.metalLayer, fps: wanted.fps)
+        }
     }
 }

@@ -50,7 +50,7 @@ enum Watchdog {
             while kevent(queue, nil, 0, &event, 1, nil) < 0 && errno == EINTR {}
         }
         let died = UserDefaults.standard.integer(forKey: runningKey) == Int(viewer)
-        LaptopScreen().recover()
+        LaptopScreen().release()
         if died {
             UserDefaults.standard.removeObject(forKey: runningKey)
             // The glasses would otherwise stay side by side until replugged.

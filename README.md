@@ -79,8 +79,8 @@ panels tilted to face you.
 The viewer measures when each frame really reaches the glasses and predicts
 the head pose for that moment; the latency and late frames per second are in
 **Controls… > Diagnostics** and on the dashboard. It also waits to read the
-pose until just before each frame's deadline (**Take Head Pose Late**), which
-measurably drops fewer frames. Hitches are logged: late and dropped frames,
+pose until just before each frame's deadline, which measurably drops fewer
+frames. Hitches are logged: late and dropped frames,
 gaps in the IMU samples, slow dashboard updates and capture rate changes:
 
 ```sh
@@ -94,8 +94,7 @@ and neither the canvas's size, rate or place nor the viewer's own settings
 and thread priorities change the period. It also needs the Mac's own screen
 on: with the lid closed, or the screen switched off, there are none. So the
 viewer switches the Mac's screen off while the glasses are in use (with
-macOS's private display switch, the one display utilities use), or if that is
-turned off or unavailable, holds it at 60 Hz, which halves them. A watchdog, a
+macOS's private display switch, the one display utilities use). A watchdog, a
 second copy of the viewer started with `--watchdog PID`, brings the screen
 back, and the glasses to their own picture, if the viewer dies. Environment switches, for measuring:
 `XREAL_NO_CANVAS=1` (glasses only), `XREAL_NO_CAPTURE=1` (canvas, not

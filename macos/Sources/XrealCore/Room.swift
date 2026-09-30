@@ -328,6 +328,15 @@ public struct ScreenSurface: Equatable, Sendable {
     }
 }
 
+/// How a screen bends round the viewer.
+public enum CanvasShape: String, CaseIterable, Sendable {
+    case flat = "Flat"
+    /// Round the viewer like a curved monitor.
+    case curved = "Curved"
+    /// Round the viewer both ways, part of a ball centred on them.
+    case wrapped = "Wrap Around You"
+}
+
 /// A virtual screen and where it hangs in the room.
 public struct RoomScreen: Equatable, Sendable {
     /// The size in points. At distance 1 each point shows on one glasses
@@ -365,6 +374,15 @@ public struct RoomScreen: Equatable, Sendable {
         self.spherical = spherical
         self.verticalWrap = verticalWrap
         self.evenSize = evenSize
+    }
+
+    /// `curved` and `spherical` as one choice.
+    public var shape: CanvasShape {
+        get { spherical ? .wrapped : curved ? .curved : .flat }
+        set {
+            curved = newValue != .flat
+            spherical = newValue == .wrapped
+        }
     }
 
     /// Whether a virtual screen of this size can be made without upsetting
@@ -579,21 +597,6 @@ public struct RoomView: Sendable {
     /// The eyes whose views the output holds side by side, in that order,
     /// with their positions in room units.
     public var eyes: [EyeOptics] = []
-
-    /// Whether the view zoomed out by `scale` (below 1 widens it) shows the
-    /// room point `point` inside `margin` of its size.
-    public func shows(_ point: SIMD3<Float>, scale: Float, margin: Float) -> Bool {
-        var wider = self
-        wider.tanHalfFov /= scale
-        guard let output = wider.outputPoint(ofRoom: point) else { return false }
-        return abs(output.x) <= margin && abs(output.y) <= margin
-    }
-
-    /// Whether the room point `point` is in front of the viewer, where
-    /// zooming out can bring it into view.
-    public func isAhead(_ point: SIMD3<Float>) -> Bool {
-        (headRotation.transpose * point).z < -1e-3
-    }
 
     /// Where the room point `point` appears in the view, from -1 to 1 with y
     /// up, or nil when it is behind the viewer.

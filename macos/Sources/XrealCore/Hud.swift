@@ -35,18 +35,15 @@ public struct HudInfo {
     public var stats: RenderStats
     public var tracking: TrackingSnapshot
     public var pose: HeadPose
-    public var prediction: Bool
     public var lastDrift: DriftObservation?
     public var now: Double
     /// When frames lately reached the display.
     public var timing: FrameTiming
-    public var latePoseSampling: Bool
 
     public init(
         gaze: SIMD2<Float>?, source: (width: Int, height: Int)?, sourceDescription: String,
         output: (width: Int, height: Int), newFrame: Bool, stats: RenderStats, tracking: TrackingSnapshot,
-        pose: HeadPose, prediction: Bool, lastDrift: DriftObservation?, now: Double,
-        timing: FrameTiming = FrameTiming(), latePoseSampling: Bool = false
+        pose: HeadPose, lastDrift: DriftObservation?, now: Double, timing: FrameTiming = FrameTiming()
     ) {
         self.gaze = gaze
         self.source = source
@@ -56,11 +53,9 @@ public struct HudInfo {
         self.stats = stats
         self.tracking = tracking
         self.pose = pose
-        self.prediction = prediction
         self.lastDrift = lastDrift
         self.now = now
         self.timing = timing
-        self.latePoseSampling = latePoseSampling
     }
 }
 
@@ -105,7 +100,7 @@ public func hudLines(_ info: HudInfo) -> [String] {
     let latency =
         "Pose to display \(milliseconds(timing.lastLead)), \(milliseconds(timing.extraDelay)) past the promised time, "
         + String(format: "%.1f late/s", timing.lateFramesPerSecond(now: info.now))
-        + (info.latePoseSampling ? ", pose taken \(milliseconds(timing.workBudget)) before the deadline" : "")
+        + ", pose taken \(milliseconds(timing.workBudget)) before the deadline"
 
     return [
         String(format: "%@, %.0f fps, capture %.0f fps", frameState, info.stats.fps, info.stats.captureFps),
@@ -117,8 +112,6 @@ public func hudLines(_ info: HudInfo) -> [String] {
         info.sourceDescription,
         "\(source)  Output \(info.output.width)×\(info.output.height)",
         view,
-        String(
-            format: "Yaw %.3f  Pitch %.3f  Roll %.3f  Prediction %@", info.pose.yaw, info.pose.pitch, info.pose.roll,
-            info.prediction ? "on" : "off"),
+        String(format: "Yaw %.3f  Pitch %.3f  Roll %.3f", info.pose.yaw, info.pose.pitch, info.pose.roll),
     ]
 }

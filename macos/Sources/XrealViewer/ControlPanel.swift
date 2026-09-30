@@ -58,7 +58,6 @@ struct Headline {
 @MainActor @Observable final class ControlModel {
     private let viewer: Viewer
     private(set) var settings: XrealCore.Settings
-    private(set) var followsRoll: Bool
     private(set) var info: HudInfo
     private(set) var source: SourceStatus
     private(set) var screenRecordingAllowed = true
@@ -73,8 +72,7 @@ struct Headline {
 
     init(viewer: Viewer) {
         self.viewer = viewer
-        let current = viewer.current
-        (settings, followsRoll) = (current.settings, current.viewport.followsRoll)
+        settings = viewer.settings
         (info, source) = viewer.statusInfo()
         refresh()
     }
@@ -83,14 +81,18 @@ struct Headline {
     var statusLines: [String] { hudLines(info) }
 
     func refresh() {
-        let current = viewer.current
-        settings = current.settings
-        followsRoll = current.viewport.followsRoll
-        (info, source) = viewer.statusInfo()
-        screenRecordingAllowed = CGPreflightScreenCaptureAccess()
-        windowControlAllowed = WindowControl.allowed(prompt: false)
-        pinnedWindowStatus = viewer.pinnedWindowStatus
-        pinnedWindowID = viewer.preferredPinnedWindowID
+        // Set only when changed: each set redraws what reads it.
+        func update<T: Equatable>(_ value: ReferenceWritableKeyPath<ControlModel, T>, _ new: T) {
+            if self[keyPath: value] != new { self[keyPath: value] = new }
+        }
+        update(\.settings, viewer.settings)
+        let status = viewer.statusInfo()
+        info = status.info
+        update(\.source, status.source)
+        update(\.screenRecordingAllowed, CGPreflightScreenCaptureAccess())
+        update(\.windowControlAllowed, WindowControl.allowed(prompt: false))
+        update(\.pinnedWindowStatus, viewer.pinnedWindowStatus)
+        update(\.pinnedWindowID, viewer.preferredPinnedWindowID)
     }
 
     func perform(_ command: ViewerCommand) {
@@ -111,7 +113,7 @@ struct Headline {
         windowsError = nil
         windowsTask = Task {
             do {
-                let windows = try await viewer.pinnableWindows()
+                let windows = try await ScreenCapture.pinnableWindows()
                 guard !Task.isCancelled else { return }
                 pinnableWindows = windows
             } catch {
@@ -266,12 +268,15 @@ private struct CanvasSection: View {
                 Text("Lights the room round the canvas in the colours of its edges, like a TV's backlight.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Toggle("Curved", isOn: model.toggle(\.settings.canvas.curved, .toggleCurved))
-                .disabled(settings.canvas.spherical)
             VStack(alignment: .leading) {
-                Toggle("Wrap Around You", isOn: model.toggle(\.settings.canvas.spherical, .toggleSpherical))
+                Picker(
+                    "Shape",
+                    selection: Binding(get: { settings.canvas.shape }, set: { model.perform(.setShape($0)) })
+                ) {
+                    ForEach(CanvasShape.allCases, id: \.self) { shape in Text(shape.rawValue).tag(shape) }
+                }
                 Text(
-                    "Curves the canvas up and down as well, like the inside of a ball centred on you, so every pixel faces you."
+                    "Wrap Around You curves the canvas up and down as well, like the inside of a ball centred on you, so every pixel faces you."
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }
@@ -319,13 +324,9 @@ private struct CanvasSection: View {
                         get: { log(settings.metresPerRoomUnit) },
                         set: { model.perform(.setDepthScale(snappedViewingDistance(exp($0)))) }),
                     in: log(minViewingDistance)...log(maxViewingDistance))
-                HStack {
-                    Button("Match the Glasses' Focus") { model.perform(.setDepthScale(glassesFocusDistance)) }
-                        .disabled(settings.metresPerRoomUnit == glassesFocusDistance)
-                    if settings.metresPerRoomUnit == glassesFocusDistance {
-                        Label("Eyes aim and focus at the same distance", systemImage: "checkmark.circle.fill")
-                            .font(.caption).foregroundStyle(.green)
-                    }
+                if settings.metresPerRoomUnit == glassesFocusDistance {
+                    Label("Eyes aim and focus at the same distance", systemImage: "checkmark.circle.fill")
+                        .font(.caption).foregroundStyle(.green)
                 }
                 Text(
                     "Nearer shows more depth between the eyes' views; the canvas keeps its size. The glasses' optics focus at about 4 m, where the slider snaps: there the eyes aim and focus at the same distance, easiest on them over hours."
@@ -342,41 +343,18 @@ private struct ViewSection: View {
 
     var body: some View {
         Section("View") {
-            Toggle("Follow Head Tilt", isOn: model.toggle(\.followsRoll, .toggleRoll))
-            Toggle("Predict Head Motion", isOn: model.toggle(\.settings.prediction, .togglePrediction))
-            VStack(alignment: .leading) {
-                LabeledContent("Extra Prediction Lead") {
-                    Text(String(format: "%.0f ms", model.settings.latencyTrimMs)).monospacedDigit()
-                }
-                Slider(
-                    value: Binding(
-                        get: { model.settings.latencyTrimMs }, set: { model.perform(.setLatencyTrim($0)) }),
-                    in: 0...maxLatencyTrimMs, step: 1)
-                Text(
-                    "On top of the delay the viewer measures itself. Raise it if the canvas trails behind quick head turns, lower it if it overshoots."
-                )
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            .disabled(!model.settings.prediction)
-            Toggle("Take Head Pose Late", isOn: model.toggle(\.settings.latePoseSampling, .toggleLatePoseSampling))
-                .disabled(!model.settings.prediction)
-            Toggle("Draw Pointer Live", isOn: model.toggle(\.settings.livePointer, .toggleLivePointer))
-            Toggle("Zoom Out to Show Cursor", isOn: model.toggle(\.settings.followCursor, .toggleFollowCursor))
+            Toggle("Follow Head Tilt", isOn: model.toggle(\.settings.followRoll, .toggleRoll))
             Toggle("Sharpen Text", isOn: model.toggle(\.settings.sharpFiltering, .toggleSharpFiltering))
             Toggle("Soft Edges", isOn: model.toggle(\.settings.softEdges, .toggleSoftEdges))
             VStack(alignment: .leading) {
                 Toggle(
                     "Turn Off the Laptop Screen While Wearing the Glasses",
                     isOn: model.toggle(\.settings.laptopScreenOff, .toggleLaptopScreenOff))
-                Toggle(
-                    "Otherwise Hold It at 60 Hz",
-                    isOn: model.toggle(\.settings.steadyLaptopScreen, .toggleSteadyLaptopScreen))
                 Text(
-                    "With the laptop's screen on alongside the canvas, the glasses drop frames every few seconds; at 60 Hz about half as often, switched off not at all. It comes back as it was when the glasses are unplugged, this is turned off or the viewer quits, and if the viewer dies, at once."
+                    "With the laptop's screen on alongside the canvas, the glasses drop frames every few seconds; switched off, not at all. It comes back on when the glasses are unplugged, this is turned off or the viewer quits, and if the viewer dies, at once."
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }
-            Toggle("Correct Lens Distortion", isOn: model.toggle(\.settings.lensCorrection, .toggleLensCorrection))
         }
     }
 }
@@ -586,10 +564,11 @@ private struct ShortcutsSection: View {
 
 private struct DiagnosticsSection: View {
     let model: ControlModel
+    @AppStorage("diagnosticsVisible") private var visible = true
 
     var body: some View {
         Section {
-            DisclosureGroup("Diagnostics", isExpanded: model.toggle(\.settings.diagnosticsVisible, .toggleDiagnostics)) {
+            DisclosureGroup("Diagnostics", isExpanded: $visible) {
                 Text(model.statusLines.joined(separator: "\n"))
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)

@@ -5,15 +5,12 @@ import simd
 
 @Test func savedSettingsLoadBackUnchanged() throws {
     var settings = Settings()
-    settings.prediction = false
-    settings.diagnosticsVisible = false
     settings.gyroBias = SIMD3(0.0012, -0.0034, 0.00056)
     settings.gyroBiasSlope = SIMD3(0.00005, -0.0001, 0.00002)
     settings.canvas = RoomScreen(
         width: 7672, height: 2160, placement: ScreenPlacement(direction: SIMD3(0.4, 0.3, -1), distance: 1.5, tilt: -0.3),
         curved: true)
     settings.followRoll = false
-    settings.followCursor = false
 
     var loaded = Settings.parse(settings.serialize())
     #expect(loaded.canvas.width == 7672 && loaded.canvas.height == 2160 && loaded.canvas.curved)
@@ -25,37 +22,6 @@ import simd
 
     loaded.canvas = settings.canvas
     #expect(loaded == settings)
-}
-
-@Test func theCanvasFromBeforeThereWasOnlyOneKeepsItsPlace() throws {
-    // As saved when there were several screens and ways to show them.
-    let old = """
-        zoom_index=2
-        sensitivity=1.0
-        deadzone_index=3
-        prediction=true
-        source=virtual_only
-        screen=5120x1440@0.0,0.4,-0.9,1.0
-        screen=2880x1620
-        screen=2880x1620
-        glasses_only_screen=5752x2160,curved@-0.0968999,0.0034615872,-0.9952881,1.2099997
-        projection=curved
-        edge=black
-        stereo=true
-        curve_radius=1.0
-
-        """
-    let canvas = Settings.parse(old).canvas
-    #expect(canvas.width == 5752 && canvas.height == 2160 && canvas.curved)
-    let expected = simd_normalize(SIMD3<Float>(-0.0968999, 0.0034615872, -0.9952881))
-    #expect(simd_distance(canvas.placement.direction, expected) < 1e-5)
-    #expect(abs(canvas.placement.distance - 1.2099997) < 1e-5)
-    #expect(canvas.placement.tilt == 0)
-}
-
-@Test func theCanvasLineWinsOverOlderScreens() {
-    let settings = Settings.parse("glasses_only_screen=1920x1080\ncanvas=3832x2160,curved\n")
-    #expect(settings.canvas == RoomScreen(width: 3832, height: 2160, curved: true))
 }
 
 @Test func malformedCanvasesAreSkipped() {
@@ -70,36 +36,41 @@ import simd
 }
 
 @Test func malformedValuesFallBackToDefaults() {
-    let settings = Settings.parse("prediction=banana\nnonsense\ncurve_radius=-1\nfollow_cursor=false\n")
-    #expect(settings.prediction == Settings().prediction)
+    let settings = Settings.parse("follow_roll=banana\nnonsense\ncurve_radius=-1\nsoft_edges=false\n")
+    #expect(settings.followRoll == Settings().followRoll)
     #expect(settings.curveRadius == Settings().curveRadius)
-    #expect(settings.followCursor == false)
+    #expect(settings.softEdges == false)
 }
 
-@Test func settingsWrittenByTheRustVersionStillLoad() {
-    let rust = """
-        zoom_index=4
-        sensitivity=0.85
-        deadzone_index=1
+@Test func settingsNoLongerUsedAreIgnoredAndTheRestStillLoads() {
+    let old = """
         prediction=false
-        overlay_visible=true
+        lens_correction=false
+        latency_trim_ms=12
+        steady_laptop_screen=false
         gyro_bias_x=0.0012
         gyro_bias_y=-0.0034
         gyro_bias_z=0.00056
+        follow_roll=false
 
         """
-    let settings = Settings.parse(rust)
-    #expect(settings.prediction == false)
-    #expect(settings.diagnosticsVisible == true)
-    #expect(settings.gyroBias == SIMD3(0.0012, -0.0034, 0.00056))
+    var expected = Settings()
+    expected.gyroBias = SIMD3(0.0012, -0.0034, 0.00056)
+    expected.followRoll = false
+    #expect(Settings.parse(old) == expected)
 }
 
 @Test func theCurveStaysChosenAfterARestart() {
     var settings = Settings()
     settings.curveRadius = 2.5
     #expect(Settings.parse(settings.serialize()).curveRadius == 2.5)
-    // Saved before it was renamed.
-    #expect(Settings.parse("sphere_curve=1.5\n").curveRadius == 1.5)
+}
+
+@Test func savedCurvesAndDistancesOutsideTheSlidersLoadWithinThem() {
+    #expect(Settings.parse("curve_radius=50\n").curveRadius == maxCurveRadius)
+    #expect(Settings.parse("curve_radius=0.1\n").curveRadius == minCurveRadius)
+    #expect(Settings.parse("metres_per_room_unit=0.3\n").metresPerRoomUnit == minViewingDistance)
+    #expect(Settings.parse("metres_per_room_unit=90\n").metresPerRoomUnit == maxViewingDistance)
 }
 
 @Test func theDepthScaleStaysChosenAfterARestart() {
@@ -120,35 +91,17 @@ import simd
     #expect(Settings.parse(settings.serialize()).metresPerRoomUnit == 20)
 }
 
-@Test func lensCorrectionIsOnUntilTurnedOffAndStaysOff() {
-    #expect(Settings.parse("").lensCorrection)
-    var settings = Settings()
-    settings.lensCorrection = false
-    #expect(!Settings.parse(settings.serialize()).lensCorrection)
-}
-
 @Test func aSavedBiasThatIsNotANumberIsIgnored() {
     let settings = Settings.parse("gyro_bias_x=nan\ngyro_bias_y=inf\ngyro_bias_slope_z=nan\ngyro_bias_z=0.002\n")
     #expect(settings.gyroBias == SIMD3(0, 0, 0.002))
     #expect(settings.gyroBiasSlope == .zero)
 }
 
-@Test func theLatencyTrimStaysChosenAfterARestartAndStaysInRange() {
-    var settings = Settings()
-    settings.latencyTrimMs = 12
-    #expect(Settings.parse(settings.serialize()).latencyTrimMs == 12)
-    #expect(Settings.parse("latency_trim_ms=-5\n").latencyTrimMs == 0)
-    #expect(Settings.parse("latency_trim_ms=900\n").latencyTrimMs == maxLatencyTrimMs)
-    #expect(Settings.parse("latency_trim_ms=nan\n").latencyTrimMs == 0)
-}
-
 @Test func theNewerViewingChoicesStayChosenAfterARestart() {
     var settings = Settings()
     settings.canvas = RoomScreen(width: 2880, height: 1620, scale: 2, curved: true, spherical: true, verticalWrap: 0.6)
     settings.canvasRefreshRate = 60
-    settings.latePoseSampling = false
     settings.sharpFiltering = false
-    settings.livePointer = false
     settings.statusStrip = false
     settings.pinnedWindow = PinnedWindow(bundleID: "com.apple.Music", title: "Music | a=b")
     #expect(Settings.parse(settings.serialize()) == settings)
@@ -188,14 +141,12 @@ import simd
     var settings = Settings()
     settings.softEdges = false
     settings.canvas.evenSize = false
-    settings.steadyLaptopScreen = false
     settings.laptopScreenOff = false
     settings.ambientLight = true
     let loaded = Settings.parse(settings.serialize())
     #expect(loaded.ambientLight && !Settings().ambientLight)
-    #expect(!loaded.steadyLaptopScreen)
     #expect(!loaded.laptopScreenOff)
-    #expect(Settings().steadyLaptopScreen && Settings().laptopScreenOff)
+    #expect(Settings().laptopScreenOff)
     #expect(!loaded.softEdges)
     #expect(!loaded.canvas.evenSize)
     #expect(Settings.parse("").softEdges && Settings.parse("").canvas.evenSize)

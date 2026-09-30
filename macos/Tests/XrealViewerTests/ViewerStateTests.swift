@@ -30,7 +30,7 @@ extension ViewerState {
         extras: ExtraSizes = ExtraSizes()
     ) -> (room: RoomView?, biasChanged: Bool) {
         advance(
-            now: now, dt: 1 / 90, presentingAt: now + 1 / 90, snapshot: head, captureGeneration: 0,
+            now: now, presentingAt: now + 1 / 90, snapshot: head, captureGeneration: 0,
             newFrame: false, frameSizes: sizes, output: output, cursor: cursor, timing: timing, extras: extras)
     }
 }
@@ -243,8 +243,6 @@ private func turnSeen(framesLate late: Double) throws -> Float {
     #expect(try drawsPointer(at: CGPoint(x: 2800, y: 1000)))
     #expect(try !drawsPointer(at: CGPoint(x: -300, y: 1000)))
     #expect(try !drawsPointer(at: nil))
-    state.settings.livePointer = false
-    #expect(try !drawsPointer(at: CGPoint(x: 2800, y: 1000)))
 }
 
 @Test func ambientLightHangsAllRoundTheCanvasWhenOn() throws {

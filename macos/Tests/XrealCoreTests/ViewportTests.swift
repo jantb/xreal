@@ -3,66 +3,6 @@ import simd
 
 @testable import XrealCore
 
-private let dt: Float = 1.0 / 90.0
-
-private struct CursorScene {
-    let canvas = Settings().canvas
-    let room: RoomView
-    var follow = CursorFollow()
-    var now = 0.0
-
-    init() {
-        var viewport = ViewportController(settings: Settings())
-        viewport.recenter(HeadPose())
-        room = viewport.roomView(canvas: canvas, outputWidth: 1920, outputHeight: 1080, highlighted: false)
-    }
-
-    /// Whether the view, zoomed out as far as the cursor has it now, shows
-    /// `pixel` of the canvas.
-    func shows(_ pixel: SIMD2<Float>) -> Bool {
-        room.shows(canvas.roomPoint(ofPixel: pixel), scale: follow.scale, margin: 1)
-    }
-
-    /// Runs `seconds` of frames with the cursor at `cursor`, a pixel of the
-    /// canvas.
-    mutating func run(cursor: SIMD2<Float>, seconds: Double) {
-        let point = canvas.roomPoint(ofPixel: cursor)
-        for _ in 0..<Int(seconds * 90) {
-            now += Double(dt)
-            _ = follow.update(cursor: cursor, enabled: true, now: now, dt: dt) { [room] scale, margin in
-                room.shows(point, scale: scale, margin: margin)
-            }
-        }
-    }
-}
-
-private let middle = SIMD2<Float>(2876, 1080)
-private let farCorner = SIMD2<Float>(5500, 2000)
-
-@Test func movingTheMouseOutOfViewZoomsOutUntilTheCursorShows() {
-    var scene = CursorScene()
-    scene.run(cursor: middle, seconds: 0.1)
-    #expect(!scene.shows(farCorner))
-
-    scene.run(cursor: farCorner, seconds: 1)
-    #expect(scene.shows(farCorner))
-}
-
-@Test func cursorBackInViewZoomsBackIn() {
-    var scene = CursorScene()
-    scene.run(cursor: middle, seconds: 0.1)
-    scene.run(cursor: farCorner, seconds: 1)
-
-    scene.run(cursor: middle, seconds: 2)
-    #expect(scene.follow.scale == 1)
-}
-
-@Test func cursorLeftOutOfViewWithoutMovingDoesNotZoomOut() {
-    var scene = CursorScene()
-    scene.run(cursor: farCorner, seconds: 1)
-    #expect(scene.follow.scale == 1)
-}
-
 @Test func theCanvasTurnsWithTheHeadAtOnce() {
     var viewport = ViewportController(settings: Settings())
     viewport.recenter(HeadPose())

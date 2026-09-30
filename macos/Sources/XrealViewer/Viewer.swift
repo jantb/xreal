@@ -33,6 +33,10 @@ private let maxPinnedPixels: CGFloat = 4096
 // How often the pinned window is checked for moving, resizing or closing,
 // and the dashboard and the pointer's shape brought up to date.
 private let pinnedCheckInterval = 2.0
+// How long before a pinned window that was not there is looked for again.
+private let pinnedRetryInterval = 10.0
+// How long after a capture of the canvas stops by itself it is started again.
+private let captureRestartDelay = 2.0
 // Ten times a second: numbers and graphs move smoothly, and a look at the
 // Mac and a redraw take a few milliseconds on a queue of their own.
 private let statusInterval = 0.1
@@ -45,15 +49,6 @@ let glassesRefreshRate = 90.0
 private let levelSnapTilt: Float = 2 * .pi / 180  // rad
 // Each step of bringing the canvas closer or pushing it away.
 private let distanceStep: Float = 1.1
-/// The range of the viewing distance slider, in metres: how far away the
-/// canvas at distance 1 is.
-let minViewingDistance: Float = 0.5
-let maxViewingDistance: Float = 20
-
-/// The range of the curve slider, as multiples of the canvas's distance: the
-/// smaller the radius, the stronger the curve.
-let minCurveRadius: Float = 0.5
-let maxCurveRadius: Float = 5
 // How far the glow round the canvas reaches past its edges, in points, and
 // how bright it is at the edge.
 private let ambientReach: Float = 360
@@ -109,20 +104,13 @@ enum ViewerCommand {
     /// Puts the canvas back straight ahead, level and at the glasses' own
     /// pixel density, and recenters.
     case resetView
-    case togglePrediction
     case toggleRoll
-    case toggleFollowCursor
-    case toggleDiagnostics
-    case setLatencyTrim(Float)
     case setCurveRadius(Float)
-    case toggleLensCorrection
     case setDepthScale(Float)
     case calibrate
-    case toggleCurved
-    case toggleSpherical
+    case setShape(CanvasShape)
     case toggleEvenTextSize
     case toggleSoftEdges
-    case toggleSteadyLaptopScreen
     case toggleLaptopScreenOff
     case toggleAmbientLight
     /// How far a wrapped canvas bends up and down, 0 to 1.
@@ -135,9 +123,7 @@ enum ViewerCommand {
     case resizeCanvas(bigger: Bool)
     case setCanvasSize(width: Int, height: Int, scale: Int)
     case setCanvasRefreshRate(Int)
-    case toggleLatePoseSampling
     case toggleSharpFiltering
-    case toggleLivePointer
     case toggleStatusStrip
     case setPinnedWindow(PinnedWindow?)
     /// Pins one window of those listed, even among several with its title.
@@ -169,7 +155,6 @@ enum WindowCommand {
 struct ViewerState: Sendable {
     var settings: Settings
     var viewport: ViewportController
-    var cursorFollow = CursorFollow()
     var drift = DriftLearner()
     var lastDrift: DriftObservation?
     var trackingSession: UInt64 = 0
@@ -194,6 +179,9 @@ struct ViewerState: Sendable {
     var gaze: SIMD2<Float>?
     /// For each capture, whether it was in view or nearly in the latest frame.
     var capturesInView: [Bool] = []
+    /// Whether the dashboard was in view or nearly in the latest frame, or
+    /// not drawn yet, so it is worth drawing again.
+    var dashboardInView = true
     var outlineUntil = 0.0
 
     // The latest frame, for the status lines.
@@ -298,7 +286,7 @@ struct ViewerState: Sendable {
     /// draw, nil until the glasses show side by side, and whether the gyro
     /// bias changed and should be saved.
     mutating func advance(
-        now: Double, dt: Float, presentingAt: Double, snapshot: TrackingSnapshot, captureGeneration: UInt64,
+        now: Double, presentingAt: Double, snapshot: TrackingSnapshot, captureGeneration: UInt64,
         newFrame: Bool, frameSizes: [(width: Int, height: Int)?], output: (width: Int, height: Int),
         cursor: CGPoint?, timing: FrameTiming = FrameTiming(), extras: ExtraSizes = ExtraSizes()
     ) -> (room: RoomView?, biasChanged: Bool) {
@@ -316,8 +304,7 @@ struct ViewerState: Sendable {
         // glasses' own delay.
         let lead =
             max(presentingAt - now, 0) + (timing.extraDelay ?? 0) + glassesDisplayDelay
-            + Double(settings.latencyTrimMs) / 1000
-        let pose = settings.prediction ? snapshot.predict(now: now, lead: lead) : snapshot.pose
+        let pose = snapshot.predict(now: now, lead: lead)
         lastPose = pose
         if snapshot.session != trackingSession {
             trackingSession = snapshot.session
@@ -325,19 +312,17 @@ struct ViewerState: Sendable {
             viewport.recenter(pose)
         }
         viewport.track(pose: pose)
-        var room = roomView(now: now, dt: dt, output: output, frameSizes: frameSizes, cursor: cursor, extras: extras)
-        if settings.prediction {
-            let end = snapshot.predict(now: now, lead: lead + scanoutTime)
-            let turn = SIMD3(wrapAngle(end.yaw - pose.yaw), end.pitch - pose.pitch, wrapAngle(end.roll - pose.roll))
-            room.scanEndRotation = viewport.headRotation(advancedBy: turn)
-        }
+        var room = roomView(now: now, output: output, frameSizes: frameSizes, cursor: cursor, extras: extras)
+        let end = snapshot.predict(now: now, lead: lead + scanoutTime)
+        let turn = SIMD3(wrapAngle(end.yaw - pose.yaw), end.pitch - pose.pitch, wrapAngle(end.roll - pose.roll))
+        room.scanEndRotation = viewport.headRotation(advancedBy: turn)
         // Until the glasses switch to side by side, the output is still one
         // view wide.
         return (output.width >= 3 * output.height ? room : nil, biasChanged)
     }
 
     private mutating func roomView(
-        now: Double, dt: Float, output: (width: Int, height: Int), frameSizes: [(width: Int, height: Int)?],
+        now: Double, output: (width: Int, height: Int), frameSizes: [(width: Int, height: Int)?],
         cursor: CGPoint?, extras: ExtraSizes
     ) -> RoomView {
         let rotation = viewport.headRotation
@@ -349,26 +334,11 @@ struct ViewerState: Sendable {
         var room = viewport.roomView(
             canvas: canvas, outputWidth: output.width / 2, outputHeight: output.height,
             highlighted: grab != nil || now < outlineUntil, curveRadius: curveRadius)
-        // Zoom out while the mouse moves where it cannot be seen; behind the
-        // viewer no zoom would show it.
-        let cursorPoint = cursor.flatMap(roomPoint(ofCursor:)).flatMap { room.isAhead($0) ? $0 : nil }
-        let scale = cursorFollow.update(
-            cursor: cursor.map { SIMD2(Float($0.x), Float($0.y)) }.flatMap { cursorPoint == nil ? nil : $0 },
-            enabled: settings.followCursor, now: now, dt: dt
-        ) { scale, margin in
-            cursorPoint.map { room.shows($0, scale: scale, margin: margin) } ?? false
-        }
-        room.tanHalfFov /= scale
-        // Each eye as the glasses' calibration describes it, zoomed out with
-        // the rest of the view.
+        // Each eye as the glasses' calibration describes it.
         let optics = snapshot.display ?? .nominal
         room.eyes = [optics.left, optics.right].map { eye in
             var eye = eye
             eye.position /= settings.metresPerRoomUnit
-            eye.focal *= scale
-            if !settings.lensCorrection {
-                eye.distortion = nil
-            }
             return eye
         }
         capturesInView = Array(repeating: false, count: frameSizes.count)
@@ -399,17 +369,21 @@ struct ViewerState: Sendable {
         // Above the canvas, in a row tilted to face the viewer.
         let overhead = overheadLayout(
             canvas: canvas, dashboard: settings.statusStrip ? extras.status : nil, pinned: extras.pinned)
+        // Not shown yet, it is drawn so it can be.
+        dashboardInView = true
         if overhead.height > 0 {
             let row = overheadViews(canvas: canvas, curveRadius: curveRadius, layout: overhead)
             if let dashboard = row.dashboard {
-                room.panels.append(RoomView.Panel(source: .status, surface: dashboard.surface, rect: dashboard.rect))
+                let panel = RoomView.Panel(source: .status, surface: dashboard.surface, rect: dashboard.rect)
+                dashboardInView = room.shows(panel, margin: inViewMargin)
+                room.panels.append(panel)
             }
             if let pinned = row.pinned {
                 room.panels.append(RoomView.Panel(source: .pinned, surface: pinned.surface, rect: pinned.rect))
             }
         }
         // The pointer last, over everything it lies on.
-        if settings.livePointer, let pointer = extras.pointer, let point = cursor.flatMap(canvasPoint(ofCursor:)) {
+        if let pointer = extras.pointer, let point = cursor.flatMap(canvasPoint(ofCursor:)) {
             let rect = pointerRect(canvas: canvas, at: point, size: pointer.size, hotSpot: pointer.hotSpot)
             room.panels.append(RoomView.Panel(source: .pointer, surface: surface, rect: rect))
         }
@@ -445,31 +419,17 @@ struct ViewerState: Sendable {
             Float((point.y - bounds.minY) / bounds.height) * Float(canvas.height))
     }
 
-    /// Where the mouse at `point`, in global coordinates, is in the room, if
-    /// it is on the canvas.
-    private func roomPoint(ofCursor point: CGPoint) -> SIMD3<Float>? {
-        canvasPoint(ofCursor: point).map { settings.canvas.roomPoint(ofPixel: $0, curveRadius: settings.curveRadius) }
-    }
-
     func hudInfo(now: Double) -> HudInfo {
         HudInfo(
             gaze: gaze, source: sourceSize, sourceDescription: source.diagnosticsDescription, output: output,
-            newFrame: newFrame, stats: stats, tracking: snapshot, pose: lastPose, prediction: settings.prediction,
-            lastDrift: lastDrift, now: now, timing: timing, latePoseSampling: settings.latePoseSampling)
-    }
-}
-
-final class SharedState: Sendable {
-    let mutex: Mutex<ViewerState>
-
-    init(_ state: ViewerState) {
-        mutex = Mutex(state)
+            newFrame: newFrame, stats: stats, tracking: snapshot, pose: lastPose,
+            lastDrift: lastDrift, now: now, timing: timing)
     }
 }
 
 /// Builds one frame per refresh of the glasses, on the display link thread.
 final class FrameLoop: @unchecked Sendable {
-    private let shared: SharedState
+    private let shared: Guarded<ViewerState>
     private let tracking: Tracking
     private let renderer: Renderer
     private let status: LatestFrame
@@ -481,11 +441,10 @@ final class FrameLoop: @unchecked Sendable {
     private var sources: [ObjectIdentifier] = []
     private var frames: [CapturedFrame?] = []
     private var generations: [UInt64] = []
-    private var lastRenderAt = monotonicNow()
     private var lastFreeCursor: CGPoint?
 
     init(
-        shared: SharedState, tracking: Tracking, renderer: Renderer, status: LatestFrame,
+        shared: Guarded<ViewerState>, tracking: Tracking, renderer: Renderer, status: LatestFrame,
         pointer: Guarded<(frame: CapturedFrame?, hotSpot: SIMD2<Float>)>
     ) {
         self.shared = shared
@@ -500,17 +459,13 @@ final class FrameLoop: @unchecked Sendable {
     func render(to drawable: CAMetalDrawable, presentingAt: Double, deadline: Double) {
         // The later the pose is taken, the less there is to predict: wait
         // until just enough time is left for the frame's work.
-        if shared.mutex.withLock({ $0.settings.latePoseSampling }) {
-            let wake = deadline - timing.mutex.withLock { $0.workBudget }
-            sleep(until: wake)
-            let overslept = monotonicNow() - wake
-            if overslept > 0.002 {
-                timingLog.notice("Render thread woke \(String(format: "%.1f", overslept * 1000), privacy: .public) ms late")
-            }
+        let wake = deadline - timing.mutex.withLock { $0.workBudget }
+        sleep(until: wake)
+        let overslept = monotonicNow() - wake
+        if overslept > 0.002 {
+            timingLog.notice("Render thread woke \(String(format: "%.1f", overslept * 1000), privacy: .public) ms late")
         }
         let now = monotonicNow()
-        let dt = Float(min(max(now - lastRenderAt, 0), 0.1))
-        lastRenderAt = now
 
         let (captures, pinned, fence, sharpen, softEdges) = shared.mutex.withLock {
             ($0.captures, $0.pinned, $0.cursorFence, $0.settings.sharpFiltering, $0.settings.softEdges)
@@ -544,10 +499,10 @@ final class FrameLoop: @unchecked Sendable {
         }
         let output = (width: drawable.texture.width, height: drawable.texture.height)
         let frameSizes = frames.map { frame in frame.map { (width: $0.width, height: $0.height) } }
+        // The image and its hot spot together, as one pointer shape.
+        let (pointerFrame, hotSpot) = pointer.mutex.withLock { ($0.frame, $0.hotSpot) }
         let images = PanelImages(
-            canvas: frames, status: status.current().frame, pinned: pinned?.current().frame,
-            pointer: pointer.mutex.withLock { $0.frame })
-        let hotSpot = pointer.mutex.withLock { $0.hotSpot }
+            canvas: frames, status: status.current().frame, pinned: pinned?.current().frame, pointer: pointerFrame)
         func points(_ frame: CapturedFrame) -> SIMD2<Float> {
             SIMD2(Float(frame.width), Float(frame.height)) / frame.pixelsPerPoint
         }
@@ -561,7 +516,7 @@ final class FrameLoop: @unchecked Sendable {
         let snapshot = tracking.snapshot()
         let result = shared.mutex.withLock { state in
             state.advance(
-                now: now, dt: dt, presentingAt: presentingAt, snapshot: snapshot,
+                now: now, presentingAt: presentingAt, snapshot: snapshot,
                 captureGeneration: captureGeneration, newFrame: newFrame, frameSizes: frameSizes, output: output,
                 cursor: cursor, timing: timingNow, extras: extras)
         }
@@ -596,7 +551,7 @@ final class FrameLoop: @unchecked Sendable {
 /// Ties head tracking, capture and rendering together, and applies the
 /// commands from the menu and keyboard.
 @MainActor final class Viewer {
-    private let shared: SharedState
+    private let shared: Guarded<ViewerState>
     private let tracking: Tracking
     private let device: MTLDevice
     private let window: GlassesWindow
@@ -631,13 +586,18 @@ final class FrameLoop: @unchecked Sendable {
     private(set) var preferredPinnedWindowID: CGWindowID?
     /// Why the pinned window is not shown, for the controls.
     private(set) var pinnedWindowStatus: String?
+    /// While the pinned window is being looked for, and when to look again
+    /// for one that was not there.
+    private var pinnedSearching = false
+    private var pinnedRetryAt = 0.0
     private var settingsSaveTask: Task<Void, Never>?
+    private var captureRestartTask: Task<Void, Never>?
     private let laptopScreen = LaptopScreen()
 
     init(settings: Settings) throws {
         // The viewer needs the glasses as a display of their own.
         Displays.unmirrorGlasses()
-        let shared = SharedState(ViewerState(settings: settings))
+        let shared = Guarded(ViewerState(settings: settings))
         let tracking = Tracking(
             initialBias: settings.gyroBias, biasSlope: settings.gyroBiasSlope, displayMode: .highRefreshRateSBS)
         let renderer = try Renderer()
@@ -656,7 +616,6 @@ final class FrameLoop: @unchecked Sendable {
         window = GlassesWindow(device: renderer.device, displayLink: displayLink)
         frameLoop.onBiasChanged = { [weak self] in Task { @MainActor in self?.saveSettings() } }
 
-        window.view.onKey = { [unowned self] event in handleKey(event) }
         let modifiers = controlKey | optionKey | cmdKey
         func hotKey(_ keyCode: Int, _ command: ViewerCommand) -> GlobalHotKey {
             GlobalHotKey(keyCode: keyCode, modifiers: modifiers) { [unowned self] in perform(command) }
@@ -699,9 +658,9 @@ final class FrameLoop: @unchecked Sendable {
         restartPinned()
     }
 
-    /// The settings and view as they are now, for the menu.
-    var current: (settings: Settings, viewport: ViewportController) {
-        shared.mutex.withLock { ($0.settings, $0.viewport) }
+    /// The settings as they are now, for the controls.
+    var settings: Settings {
+        shared.mutex.withLock { $0.settings }
     }
 
     /// What the status lines are made from.
@@ -710,18 +669,17 @@ final class FrameLoop: @unchecked Sendable {
     }
 
     /// Leaves the glasses showing their own picture, and the laptop's
-    /// screen its own refresh rate, as before the viewer ran.
+    /// screen on, as before the viewer ran.
     func restoreGlasses() {
         tracking.restoreDisplayMode()
         laptopScreen.release()
     }
 
-    /// Holds the laptop's screen at 60 Hz while the glasses are in use, if
-    /// asked to.
-    private func holdLaptopScreen() {
-        let (off, steady) = shared.mutex.withLock { ($0.settings.laptopScreenOff, $0.settings.steadyLaptopScreen) }
-        let wearing = Displays.glassesDisplay() != nil
-        laptopScreen.update(off: off && wearing, steady: steady && wearing)
+    /// Switches the laptop's screen off while the glasses are in use, if
+    /// asked to, and back on otherwise.
+    private func updateLaptopScreen() {
+        let off = shared.mutex.withLock { $0.settings.laptopScreenOff }
+        laptopScreen.update(off: off && Displays.glassesDisplay() != nil)
     }
 
     func saveSettings() {
@@ -729,7 +687,6 @@ final class FrameLoop: @unchecked Sendable {
         timingLog.notice("Saving settings")
         let bias = tracking.snapshot().thermalBias
         let settings = shared.mutex.withLock { state in
-            state.viewport.store(into: &state.settings)
             state.settings.gyroBias = bias.reference
             state.settings.gyroBiasSlope = bias.slope
             return state.settings
@@ -760,22 +717,19 @@ final class FrameLoop: @unchecked Sendable {
                 state.settings.canvas.placement = .straightAhead
                 state.drift.reset()
                 state.viewport.recenter(state.lastPose)
-            case .togglePrediction: state.settings.prediction.toggle()
-            case .toggleRoll: state.viewport.followsRoll.toggle()
-            case .toggleFollowCursor: state.settings.followCursor.toggle()
-            case .toggleDiagnostics: state.settings.diagnosticsVisible.toggle()
-            case .setLatencyTrim(let ms): state.settings.latencyTrimMs = min(max(ms, 0), maxLatencyTrimMs)
-            case .toggleLensCorrection: state.settings.lensCorrection.toggle()
-            case .setDepthScale(let metres): state.settings.metresPerRoomUnit = metres
-            case .setCurveRadius(let radius): state.settings.curveRadius = radius
+            case .toggleRoll:
+                state.settings.followRoll.toggle()
+                state.viewport.followsRoll = state.settings.followRoll
+            case .setDepthScale(let metres):
+                state.settings.metresPerRoomUnit = min(max(metres, minViewingDistance), maxViewingDistance)
+            case .setCurveRadius(let radius):
+                state.settings.curveRadius = min(max(radius, minCurveRadius), maxCurveRadius)
             case .calibrate:
                 tracking.calibrate()
                 persist = false
-            case .toggleCurved: state.settings.canvas.curved.toggle()
-            case .toggleSpherical: state.settings.canvas.spherical.toggle()
+            case .setShape(let shape): state.settings.canvas.shape = shape
             case .toggleEvenTextSize: state.settings.canvas.evenSize.toggle()
             case .toggleSoftEdges: state.settings.softEdges.toggle()
-            case .toggleSteadyLaptopScreen: state.settings.steadyLaptopScreen.toggle()
             case .toggleLaptopScreenOff: state.settings.laptopScreenOff.toggle()
             case .toggleAmbientLight: state.settings.ambientLight.toggle()
             case .setVerticalWrap(let wrap): state.settings.canvas.verticalWrap = min(max(wrap, 0), 1)
@@ -799,12 +753,7 @@ final class FrameLoop: @unchecked Sendable {
                     state.settings.canvasRefreshRate = rate
                 }
                 persist = restartSource
-            case .toggleLatePoseSampling: state.settings.latePoseSampling.toggle()
             case .toggleSharpFiltering: state.settings.sharpFiltering.toggle()
-            case .toggleLivePointer:
-                // The captures leave the pointer out while it is drawn live.
-                state.settings.livePointer.toggle()
-                restartSource = true
             case .toggleStatusStrip: state.settings.statusStrip.toggle()
             case .setPinnedWindow(let pinned):
                 repin = pinned != state.settings.pinnedWindow
@@ -815,7 +764,7 @@ final class FrameLoop: @unchecked Sendable {
                 state.settings.pinnedWindow = choice.window
                 persist = repin
             case .window:
-                break
+                break  // Handled above.
             }
         }
         if persist {
@@ -834,8 +783,7 @@ final class FrameLoop: @unchecked Sendable {
         }
         switch command {
         case .toggleStatusStrip: updateDashboard()
-        case .toggleSteadyLaptopScreen, .toggleLaptopScreenOff: holdLaptopScreen()
-        case .toggleLivePointer: updatePointer()
+        case .toggleLaptopScreenOff: updateLaptopScreen()
         default: break
         }
     }
@@ -846,11 +794,6 @@ final class FrameLoop: @unchecked Sendable {
             do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
             saveSettings()
         }
-    }
-
-    /// Windows that can be pinned above the canvas, for the controls.
-    func pinnableWindows() async throws -> [PinnableWindow] {
-        try await ScreenCapture.pinnableWindows()
     }
 
     private func screensChanged() {
@@ -883,9 +826,8 @@ final class FrameLoop: @unchecked Sendable {
                 eprint("A real display came or went")
                 arrangeCanvas()
             }
-            // The laptop's screen comes back in its own mode when the lid
-            // opens.
-            holdLaptopScreen()
+            // The laptop's screen comes back on when the lid opens.
+            updateLaptopScreen()
         }
     }
 
@@ -1003,14 +945,13 @@ final class FrameLoop: @unchecked Sendable {
 
     private func controlWindows(_ command: WindowCommand) {
         let gaze = gazeInArrangement()
-        if case .movePointerToGaze = command {
+        // Only moving the pointer needs no Accessibility access.
+        if case .movePointerToGaze = command {} else if !WindowControl.allowed(prompt: true) { return }
+        switch command {
+        case .movePointerToGaze:
             guard let gaze else { return }
             CGWarpMouseCursorPosition(gaze.point)
             CGAssociateMouseAndMouseCursorPosition(1)
-            return
-        }
-        guard WindowControl.allowed(prompt: true) else { return }
-        switch command {
         case .moveToGaze:
             guard let gaze, let window = WindowControl.focusedWindow(), let frame = WindowControl.frame(of: window)
             else { return }
@@ -1020,8 +961,6 @@ final class FrameLoop: @unchecked Sendable {
             WindowControl.setFrame(window, to: gaze.zone)
         case .gather:
             gatherWindows()
-        case .movePointerToGaze:
-            break
         }
     }
 
@@ -1054,6 +993,20 @@ final class FrameLoop: @unchecked Sendable {
         sourceTask = Task { await switchSource() }
     }
 
+    /// A capture of the canvas stopped by itself: the canvas is captured
+    /// again after a moment, once for all its tiles, rather than left
+    /// frozen on its last frame.
+    private func captureStopped() {
+        guard captureRestartTask == nil else { return }
+        captureRestartTask = Task {
+            try? await Task.sleep(for: .seconds(captureRestartDelay))
+            captureRestartTask = nil
+            guard !Task.isCancelled else { return }
+            eprint("Capturing the canvas again")
+            startSource()
+        }
+    }
+
     private func setSource(_ status: SourceStatus, captures: [ScreenCapture]) {
         self.captures = captures
         let latest = captures.map(\.latest)
@@ -1074,11 +1027,11 @@ final class FrameLoop: @unchecked Sendable {
             canvasScreen = nil
             setSource(.noGlasses, captures: [])
             window.hide()
-            holdLaptopScreen()
+            updateLaptopScreen()
             return
         }
-        window.show()
-        holdLaptopScreen()
+        window.place()
+        updateLaptopScreen()
         // For measuring the glasses' output on its own: no canvas, no
         // captures, only black frames, still timed.
         if ProcessInfo.processInfo.environment["XREAL_NO_CANVAS"] != nil {
@@ -1086,15 +1039,14 @@ final class FrameLoop: @unchecked Sendable {
             setSource(.failed("No canvas, for testing"), captures: [])
             return
         }
-        let (canvas, rate, livePointer) = shared.mutex.withLock {
-            ($0.settings.canvas, $0.settings.canvasRefreshRate, $0.settings.livePointer)
-        }
+        let (canvas, rate) = shared.mutex.withLock { ($0.settings.canvas, $0.settings.canvasRefreshRate) }
         setSource(.creatingCanvas, captures: [])
         // A canvas of the same size and rate is kept, so it stays put.
-        if canvasScreen.map({
+        let fresh = canvasScreen.map {
             $0.width != canvas.width || $0.height != canvas.height || $0.scale != canvas.scale
                 || $0.refreshRate != Double(rate)
-        }) ?? true {
+        } ?? true
+        if fresh {
             // The old one goes first: the new one may have the same identity.
             canvasScreen = nil
             canvasScreen = VirtualScreen(
@@ -1106,7 +1058,11 @@ final class FrameLoop: @unchecked Sendable {
         }
         let frame = await ScreenCapture.shareableFrame(of: screen.displayID, timeout: virtualScreenTimeout)
         guard !Task.isCancelled else { return }
-        arrangeCanvas()
+        // Arranging reconfigures every display; a kept canvas among the
+        // same displays is already in place.
+        if fresh || Self.realDisplays() != arrangedDisplays {
+            arrangeCanvas()
+        }
         // For measuring the canvas's display on its own, never captured.
         if ProcessInfo.processInfo.environment["XREAL_NO_CAPTURE"] != nil {
             setSource(.failed("Canvas not captured, for testing"), captures: [])
@@ -1126,7 +1082,7 @@ final class FrameLoop: @unchecked Sendable {
             let (capture, problem) = await startCapture(
                 displayID: screen.displayID, content: content,
                 pixelSize: (columns.count * screen.scale, screen.height * screen.scale),
-                sourceRect: screen.width == columns.count ? nil : tile, fps: rate, showsCursor: !livePointer)
+                sourceRect: screen.width == columns.count ? nil : tile, fps: rate)
             started.append(capture)
             guard !Task.isCancelled else {
                 // A newer source took over; these never reached it.
@@ -1152,15 +1108,16 @@ final class FrameLoop: @unchecked Sendable {
     /// the tiles; the second value then says what went wrong.
     private func startCapture(
         displayID: CGDirectDisplayID, content: SCShareableContent?, pixelSize: (width: Int, height: Int),
-        sourceRect: CGRect?, fps: Int, showsCursor: Bool
+        sourceRect: CGRect?, fps: Int
     ) async -> (ScreenCapture, String?) {
         do {
             let capture = try ScreenCapture(device: device)
+            capture.onStop = { [weak self] in self?.captureStopped() }
             do {
                 guard let content else { throw CaptureError.displayNotShareable }
                 try await capture.start(
                     displayID: displayID, in: content, pixelSize: pixelSize, sourceRect: sourceRect, fps: fps,
-                    showsCursor: showsCursor, excludedWindowID: window.windowID)
+                    excludedWindowID: window.windowID)
                 return (capture, nil)
             } catch {
                 let permission = CGPreflightScreenCaptureAccess() ? "" : " - allow Screen Recording and relaunch"
@@ -1175,7 +1132,9 @@ final class FrameLoop: @unchecked Sendable {
     // MARK: Above the canvas
 
     private func updateDashboard() {
-        let (enabled, info) = shared.mutex.withLock { ($0.settings.statusStrip, $0.hudInfo(now: monotonicNow())) }
+        let (enabled, inView, info) = shared.mutex.withLock {
+            ($0.settings.statusStrip, $0.dashboardInView, $0.hudInfo(now: monotonicNow()))
+        }
         guard enabled, glassesConnected else {
             dashboard.update(glasses: nil)
             return
@@ -1186,11 +1145,12 @@ final class FrameLoop: @unchecked Sendable {
                 temperature: tracking.temperature,
                 trackingHz: tracking.status == .connected ? tracking.sampleRateHz : nil, fps: info.stats.fps,
                 latency: info.timing.lastLead.map { $0 + glassesDisplayDelay },
-                lateFramesPerSecond: info.timing.lateFramesPerSecond(now: info.now)))
+                lateFramesPerSecond: info.timing.lateFramesPerSecond(now: info.now)),
+            redraw: inView)
     }
 
     private func updatePointer() {
-        guard glassesConnected, shared.mutex.withLock({ $0.settings.livePointer }) else {
+        guard glassesConnected else {
             pointerImage.hide()
             return
         }
@@ -1205,6 +1165,8 @@ final class FrameLoop: @unchecked Sendable {
 
     /// Captures the pinned window, if there is one to show.
     private func switchPinned() async {
+        pinnedSearching = true
+        defer { pinnedSearching = false }
         pinnedWindowStatus = nil
         if let old = pinnedCapture {
             pinnedCapture = nil
@@ -1223,9 +1185,17 @@ final class FrameLoop: @unchecked Sendable {
             guard !Task.isCancelled else { return }
             guard let found = ScreenCapture.find(wanted, in: content, preferredID: preferredPinnedWindowID) else {
                 pinnedWindowStatus = "Window unavailable or ambiguous. Open it or choose a window again."
+                pinnedRetryAt = monotonicNow() + pinnedRetryInterval
                 return
             }
             let capture = try ScreenCapture(device: device)
+            // Looked for again by the next check after a moment, so a
+            // capture that keeps stopping does not restart over and over.
+            capture.onStop = { [weak self, weak capture] in
+                guard let self, let capture, pinnedCapture === capture else { return }
+                pinnedTarget = nil
+                pinnedRetryAt = monotonicNow() + captureRestartDelay
+            }
             try await capture.start(window: found, fps: pinnedFps, maxPixels: maxPinnedPixels)
             guard !Task.isCancelled else {
                 await capture.stop()
@@ -1238,6 +1208,7 @@ final class FrameLoop: @unchecked Sendable {
         } catch {
             guard !Task.isCancelled else { return }
             pinnedWindowStatus = "Could not capture the window: \(error.localizedDescription)"
+            pinnedRetryAt = monotonicNow() + pinnedRetryInterval
             eprint("Could not capture the pinned window: \(error.localizedDescription)")
         }
     }
@@ -1247,7 +1218,11 @@ final class FrameLoop: @unchecked Sendable {
     private func checkPinnedWindow() {
         guard shared.mutex.withLock({ $0.settings.pinnedWindow }) != nil, glassesConnected else { return }
         guard let target = pinnedTarget, let capture = pinnedCapture else {
-            restartPinned()
+            // Not while it is still being looked for, and a window that was
+            // not there is looked for less often.
+            if !pinnedSearching, monotonicNow() >= pinnedRetryAt {
+                restartPinned()
+            }
             return
         }
         let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], target.id) as? [[String: Any]]
@@ -1263,25 +1238,6 @@ final class FrameLoop: @unchecked Sendable {
                     pinnedTarget = (target.id, frame.size)
                 }
             }
-        }
-    }
-
-    // MARK: Keys
-
-    private func handleKey(_ event: NSEvent) {
-        switch Int(event.keyCode) {
-        case kVK_Space: perform(.calibrate)
-        case kVK_Escape: NSApp.terminate(nil)
-        default: handleCharacter(event.charactersIgnoringModifiers?.lowercased() ?? "")
-        }
-    }
-
-    private func handleCharacter(_ character: String) {
-        switch character {
-        case "c": perform(.recenter)
-        case "r": perform(.resetView)
-        case "p": perform(.togglePrediction)
-        default: break
         }
     }
 }
