@@ -23,7 +23,8 @@ bundle:
 install: bundle quit
     rm -rf "{{ install_dir }}/{{ app }}"
     ditto "build/{{ app }}" "{{ install_dir }}/{{ app }}"
-    open "{{ install_dir }}/{{ app }}"
+    @# Just copied in, macOS can refuse to open it until it has noticed it.
+    open "{{ install_dir }}/{{ app }}" || (sleep 1 && open "{{ install_dir }}/{{ app }}")
 
 uninstall: quit
     rm -rf "{{ install_dir }}/{{ app }}"
