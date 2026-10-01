@@ -55,6 +55,10 @@ private final class ActionItem: NSMenuItem {
         menu.addItem(ActionItem("Calibrate Gyro (Keep Glasses Still)") { [viewer] in viewer.perform(.calibrate) })
         menu.addItem(ActionItem("Put Canvas Back Straight Ahead") { [viewer] in viewer.perform(.resetView) })
         menu.addItem(shortcut("Reset Zoom", "0") { [viewer] in viewer.perform(.resetZoom) })
+        // The app in front stays in front while this menu is open, so its
+        // focused window is the one pinned.
+        let pinTitle = viewer.pinnedTitle.map { $0.isEmpty ? "Unpin Window" : "Unpin “\($0)”" } ?? "Pin Focused Window"
+        menu.addItem(shortcut(pinTitle, "p") { [viewer] in viewer.togglePinnedWindow() })
         menu.addItem(.separator())
 
         menu.addItem(

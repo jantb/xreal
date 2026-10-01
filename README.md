@@ -47,6 +47,7 @@ Global shortcuts (⌃⌥⌘ plus a key):
 | W | Move the focused window to where you look |
 | F | Fit the focused window to the zone you look at |
 | M | Move the pointer to where you look |
+| P | Pin the focused window above the canvas, or unpin the pinned one |
 
 The canvas can be flat, curved round you like a monitor, or wrapped round
 you as part of a sphere (**Wrap Around You**), where every pixel is the same
@@ -86,6 +87,9 @@ busiest apps, the glasses and latency), and beside it, if you pick one in the
 controls, a pinned window from any app. The pinned window can stay anywhere,
 even on the glasses' own display behind the view.
 
+**Pin Focused Window** in the menu bar menu (⌃⌥⌘P) pins the window focused
+in the app in front; with a window pinned, the same item unpins it. The
+pinned window updates as often as the canvas.
 **Pinned Window > Choose…** lists windows by app and title, with their
 sizes, so windows with the same title can be told apart. The pinned window
 follows its window while its title changes. After a restart it reconnects

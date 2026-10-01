@@ -35,9 +35,8 @@ private let glassesDisplayDelay = 0.007
 // top one (Breezy Desktop uses 8 ms for the Air series).
 private let scanoutTime = 0.008
 private let virtualScreenTimeout = 10.0
-// The pinned window updates this often; it is looked at now and then.
-private let pinnedFps = 30
-// Its capture's longest side, in pixels.
+// The pinned window's capture's longest side, in pixels. It updates as
+// often as the canvas.
 private let maxPinnedPixels: CGFloat = 4096
 // How often the pinned window is checked for moving, resizing or closing,
 // and the dashboard and the pointer's shape brought up to date.
@@ -849,6 +848,7 @@ final class FrameLoop: @unchecked Sendable {
             hotKey(kVK_ANSI_W, .window(.moveToGaze)),
             hotKey(kVK_ANSI_F, .window(.fitToZone)),
             hotKey(kVK_ANSI_M, .window(.movePointerToGaze)),
+            GlobalHotKey(keyCode: kVK_ANSI_P, modifiers: modifiers) { [unowned self] in togglePinnedWindow() },
         ]
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
@@ -1034,6 +1034,8 @@ final class FrameLoop: @unchecked Sendable {
         case .toggleStatusStrip: updateDashboard()
         case .toggleSteadyLaptopScreen, .toggleLaptopScreenOff: holdLaptopScreen()
         case .toggleBlackDesktop: updateCanvasDesktop()
+        // The pinned window updates as often as the canvas.
+        case .setCanvasRefreshRate where restartSource: restartPinned()
         case .toggleLivePointer: updatePointer()
         default: break
         }
@@ -1045,6 +1047,48 @@ final class FrameLoop: @unchecked Sendable {
             do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
             saveSettings()
         }
+    }
+
+    /// The pinned window's title, if a window is pinned.
+    var pinnedTitle: String? {
+        shared.mutex.withLock { $0.settings.pinnedWindow?.title }
+    }
+
+    /// Unpins the pinned window, or, with none pinned, pins the window
+    /// focused in the app in front.
+    func togglePinnedWindow() {
+        if pinnedTitle != nil {
+            perform(.setPinnedWindow(nil))
+            return
+        }
+        guard let app = NSWorkspace.shared.frontmostApplication,
+            app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+            let id = Self.frontWindow(of: app.processIdentifier)
+        else { return }
+        Task {
+            // Titled or not: this one is picked by its window, not its title.
+            guard let content = try? await ScreenCapture.content(),
+                let window = content.windows.first(where: { $0.windowID == id }),
+                let owner = window.owningApplication, !owner.bundleIdentifier.isEmpty
+            else { return }
+            perform(
+                .pinWindow(
+                    PinnableWindow(
+                        id: id, window: PinnedWindow(bundleID: owner.bundleIdentifier, title: window.title ?? ""),
+                        appName: owner.applicationName, width: Int(window.frame.width),
+                        height: Int(window.frame.height))))
+        }
+    }
+
+    /// The front window of the app with `pid`, as the window server stacks
+    /// them: the one focused in it.
+    private static func frontWindow(of pid: pid_t) -> CGWindowID? {
+        let windows =
+            CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        return windows.first { window in
+            window[kCGWindowOwnerPID as String] as? pid_t == pid && window[kCGWindowLayer as String] as? Int == 0
+        }.flatMap { $0[kCGWindowNumber as String] as? CGWindowID }
     }
 
     /// Windows that can be pinned above the canvas, for the controls.
@@ -1481,7 +1525,8 @@ final class FrameLoop: @unchecked Sendable {
                     self?.restartPinned()
                 }
             }
-            try await capture.start(window: found, fps: pinnedFps, maxPixels: maxPinnedPixels)
+            let fps = shared.mutex.withLock { $0.settings.canvasRefreshRate }
+            try await capture.start(window: found, fps: fps, maxPixels: maxPinnedPixels)
             guard !Task.isCancelled else {
                 await capture.stop()
                 return
