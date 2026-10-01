@@ -67,6 +67,10 @@ let maxCurveRadius: Float = 5
 // how bright it is at the edge.
 private let ambientReach: Float = 480
 private let ambientBrightness: Float = 0.75
+// The plain black picture macOS ships, for the canvas's desktop, and
+// where the picture it had before is kept, to give back.
+private let blackDesktopPicture = URL(filePath: "/System/Library/Desktop Pictures/Solid Colors/Black.png")
+private let desktopBeforeKey = "canvasDesktopPictureBefore"
 // The ring round the mouse while zoomed out to show it: its radius in
 // glasses pixels, and how far zoomed out it takes to show it fully.
 private let locatorRadius: Float = 40
@@ -144,6 +148,7 @@ enum ViewerCommand {
     case toggleSteadyLaptopScreen
     case toggleLaptopScreenOff
     case toggleAmbientLight
+    case toggleBlackDesktop
     /// How far a wrapped canvas bends up and down, 0 to 1.
     case setVerticalWrap(Float)
     /// Picks up (true) or lets go of (false) the canvas, if looked at.
@@ -780,6 +785,12 @@ final class FrameLoop: @unchecked Sendable {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.screensChanged() }
         }
+        // Each Space has a desktop picture of its own.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateCanvasDesktop() }
+        }
         // Captures can stop, or stop delivering, across sleep without the
         // glasses ever going away; start them afresh once the Mac is awake.
         for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
@@ -891,6 +902,7 @@ final class FrameLoop: @unchecked Sendable {
             case .toggleSteadyLaptopScreen: state.settings.steadyLaptopScreen.toggle()
             case .toggleLaptopScreenOff: state.settings.laptopScreenOff.toggle()
             case .toggleAmbientLight: state.settings.ambientLight.toggle()
+            case .toggleBlackDesktop: state.settings.blackDesktop.toggle()
             case .setVerticalWrap(let wrap): state.settings.canvas.verticalWrap = min(max(wrap, 0), 1)
             case .grab(let pickUp):
                 // Saved once it is let go.
@@ -950,6 +962,7 @@ final class FrameLoop: @unchecked Sendable {
         switch command {
         case .toggleStatusStrip: updateDashboard()
         case .toggleSteadyLaptopScreen, .toggleLaptopScreenOff: holdLaptopScreen()
+        case .toggleBlackDesktop: updateCanvasDesktop()
         case .toggleLivePointer: updatePointer()
         default: break
         }
@@ -983,6 +996,7 @@ final class FrameLoop: @unchecked Sendable {
         }
         window.place()
         updateCanvasBounds()
+        updateCanvasDesktop()
         updateCursorFence()
         displaysTask?.cancel()
         displaysTask = Task {
@@ -1090,6 +1104,38 @@ final class FrameLoop: @unchecked Sendable {
 
     /// Tells the frame loop where the canvas is in macOS, to find the mouse
     /// on it.
+    /// Makes the canvas's desktop black, if asked to, or gives it back the
+    /// picture it had before. Call again when the canvas or the Space
+    /// changes.
+    private func updateCanvasDesktop() {
+        guard let id = canvasScreen?.displayID, let screen = NSScreen.screens.first(where: { $0.displayID == id })
+        else { return }
+        let workspace = NSWorkspace.shared
+        let current = workspace.desktopImageURL(for: screen)
+        let defaults = UserDefaults.standard
+        let wanted: URL
+        var options: [NSWorkspace.DesktopImageOptionKey: Any] = [:]
+        if shared.mutex.withLock({ $0.settings.blackDesktop }) {
+            wanted = blackDesktopPicture
+            options = [.fillColor: NSColor.black, .imageScaling: NSImageScaling.scaleAxesIndependently.rawValue]
+            // The latest picture chosen, to give back when this is turned off.
+            if let current, current != wanted {
+                defaults.set(current, forKey: desktopBeforeKey)
+            }
+        } else {
+            // Only the black this put there is replaced: a picture chosen
+            // since stays.
+            guard current == blackDesktopPicture, let before = defaults.url(forKey: desktopBeforeKey) else { return }
+            wanted = before
+        }
+        guard current != wanted else { return }
+        do {
+            try workspace.setDesktopImageURL(wanted, for: screen, options: options)
+        } catch {
+            eprint("Could not set the canvas's desktop picture: \(error.localizedDescription)")
+        }
+    }
+
     private func updateCanvasBounds() {
         let bounds = canvasScreen.map { CGDisplayBounds($0.displayID) }
         shared.mutex.withLock { $0.canvasBounds = bounds }
@@ -1236,6 +1282,7 @@ final class FrameLoop: @unchecked Sendable {
         let frame = await ScreenCapture.shareableFrame(of: screen.displayID, timeout: virtualScreenTimeout)
         guard !Task.isCancelled else { return }
         arrangeCanvas()
+        updateCanvasDesktop()
         // For measuring the canvas's display on its own, never captured.
         if ProcessInfo.processInfo.environment["XREAL_NO_CAPTURE"] != nil {
             setSource(.failed("Canvas not captured, for testing"), captures: [])

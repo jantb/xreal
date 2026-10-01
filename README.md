@@ -59,7 +59,10 @@ smooth (four samples a pixel) and fade softly into the room (**Soft
 Edges**). **Viewing Distance** starts at, and snaps to, the 4 m where the
 glasses' optics focus, so the eyes aim and focus at the same distance. **Ambient Light** mirrors what is on the canvas near its
 edges out into the room, like a dark mirror set against them: nearly sharp
-at the edge, slowly blurrier and dimmer farther out, fading evenly to black.
+at the edge, slowly blurrier and dimmer farther out, fading evenly to black. **Black
+Desktop**, on from the start, makes the canvas's desktop black, which the
+glasses show as nothing, so only your windows hang in the room; turned
+off, the canvas gets back the picture it had.
 
 **Head Movement** turns the view up to three times further than the head,
 to look round a wide canvas with less head movement; tilt is never

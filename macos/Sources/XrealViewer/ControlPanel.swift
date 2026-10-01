@@ -262,6 +262,11 @@ private struct CanvasSection: View {
             )
             .font(.caption).foregroundStyle(.secondary)
             VStack(alignment: .leading) {
+                Toggle("Black Desktop", isOn: model.toggle(\.settings.blackDesktop, .toggleBlackDesktop))
+                Text("Makes the canvas's desktop black, which the glasses show as nothing, so only your windows hang in the room.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading) {
                 Toggle("Ambient Light", isOn: model.toggle(\.settings.ambientLight, .toggleAmbientLight))
                 Text("Lights the room round the canvas in the colours of its edges, like a TV's backlight.")
                     .font(.caption).foregroundStyle(.secondary)
