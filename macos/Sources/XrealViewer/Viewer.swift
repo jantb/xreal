@@ -75,10 +75,12 @@ private let desktopBeforeKey = "canvasDesktopPictureBefore"
 // glasses pixels, and how far zoomed out it takes to show it fully.
 private let locatorRadius: Float = 40
 private let locatorFadeIn: Float = 0.15
-// The pointer counts as in view while its tip is, and when left outside is
-// brought back to the very border, only just in.
-private let pointerInViewMargin: Float = 1
-private let pointerEdgeMargin: Float = 0.995
+// A pointer left outside the view is brought back to 1 glasses pixel inside
+// its border, of the 960 from the middle to the edge, and counts as in view
+// until its tip is 3 pixels past, so macOS rounding where it is put cannot
+// tip it out and start the glide again.
+private let pointerEdgeMargin: Float = 1 - 1 / 960
+private let pointerInViewMargin: Float = 1 + 3 / 960
 // How far the dashboard and the pinned window hang, as a share of how far
 // they would hang on the canvas's own surface.
 private let overheadNearness: Float = 0.8
