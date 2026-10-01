@@ -60,11 +60,12 @@ glasses' optics focus, so the eyes aim and focus at the same distance. **Ambient
 edges out into the room, like a dark mirror set against them: nearly sharp
 at the edge, slowly blurrier and dimmer farther out, fading evenly to black.
 
-**Head Movement** turns the view up to three times further than the head,
-to look round a wide canvas with less head movement. At 1× the canvas
-stays put in the room; above it, the canvas slides the other way as you
-turn. Tilt is never multiplied, and changing it leaves the view where it
-is.
+**Head Movement** turns the view up to three times further than the head
+while it turns quickly, to look round a wide canvas with less head
+movement. Slow movement, tremor and the pulse stay one to one, so the
+canvas holds still in the room; tilt is never multiplied. Above 1×,
+straight ahead can wander from where the head points, like a mouse with
+acceleration; recentering brings it back.
 
 Above the canvas, where you see it by looking up, hangs a row tilted to face
 you: a dashboard updated ten times a second (time and thermal state, CPU per

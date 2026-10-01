@@ -364,7 +364,7 @@ struct ViewerState: Sendable {
         if grab != nil {
             viewport.recenter(pose)
         }
-        viewport.track(pose: pose)
+        viewport.track(pose: pose, dt: dt)
         var room = roomView(now: now, dt: dt, output: output, frameSizes: frameSizes, cursor: cursor, extras: extras)
         if settings.prediction {
             let end = snapshot.predict(now: now, lead: lead + scanoutTime)

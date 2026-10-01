@@ -125,38 +125,89 @@ private func viewPitch(_ viewport: ViewportController) -> Float {
     return -asin(ahead.y)
 }
 
-@Test func headMovementCanTurnTheViewFurther() {
+/// Turns the head from `from` to `to` at `speed` rad/s, a 90 Hz frame at
+/// a time.
+private func turn(_ viewport: inout ViewportController, from: HeadPose, to: HeadPose, speed: Float) {
+    let distance = simd_length(SIMD2(to.yaw - from.yaw, to.pitch - from.pitch))
+    let frames = max(Int((distance / speed * 90).rounded(.up)), 1)
+    for frame in 1...frames {
+        let t = Float(frame) / Float(frames)
+        viewport.track(
+            pose: HeadPose(yaw: from.yaw + (to.yaw - from.yaw) * t, pitch: from.pitch + (to.pitch - from.pitch) * t),
+            dt: 1 / 90)
+    }
+}
+
+private func doubling() -> ViewportController {
     var settings = Settings()
     settings.headGain = 2
     var viewport = ViewportController(settings: settings)
     viewport.recenter(HeadPose())
-    viewport.track(pose: HeadPose(yaw: 0.2, pitch: 0.1))
-    #expect(abs(viewYaw(viewport) - 0.4) <= steadyRadius + 1e-4)
-    #expect(abs(viewPitch(viewport) - 0.2) <= steadyRadius + 1e-4)
+    viewport.track(pose: HeadPose(), dt: 1 / 90)
+    return viewport
+}
+
+@Test func aQuickHeadTurnTurnsTheViewFurther() {
+    var viewport = doubling()
+    turn(&viewport, from: HeadPose(), to: HeadPose(yaw: 0.3, pitch: 0.1), speed: 2)
+    // Nearly twice as far: the first frames, still speeding up, less.
+    #expect(viewYaw(viewport) > 0.5 && viewYaw(viewport) <= 0.6 + steadyRadius)
+    #expect(viewPitch(viewport) > 0.15 && viewPitch(viewport) <= 0.2 + steadyRadius)
+}
+
+@Test func aSlowHeadTurnTurnsTheViewOnlyAsFarAsTheHead() {
+    var viewport = doubling()
+    turn(&viewport, from: HeadPose(), to: HeadPose(yaw: 0.1), speed: 0.05)
+    #expect(abs(viewYaw(viewport) - 0.1) <= steadyRadius + 1e-4)
+}
+
+@Test func headTremorDoesNotMoveTheCanvasEvenWhenHeadMovementIsMultiplied() {
+    var settings = Settings()
+    settings.headGain = maxHeadGain
+    var viewport = ViewportController(settings: settings)
+    viewport.recenter(HeadPose(yaw: 0.3))
+    viewport.track(pose: HeadPose(yaw: 0.3), dt: 1 / 90)
+    let settled = viewport.headRotation
+    // A pulse's jolt of about four glasses pixels, once a second.
+    let pixel = horizontalFov / 1920
+    for frame in 0..<270 {
+        let beat = Float(frame % 90) / 90
+        let jolt = 4 * pixel * max(0, sin(beat * 2 * .pi * 5)) * (beat < 0.1 ? 1 : 0)
+        viewport.track(pose: HeadPose(yaw: 0.3 + jolt), dt: 1 / 90)
+        let ahead = viewport.headRotation * SIMD3(0, 0, -1)
+        let still = settled * SIMD3(0, 0, -1)
+        // Moved no further than the head did.
+        #expect(simd_distance(ahead, still) <= 4 * pixel + 1e-5, "frame \(frame)")
+    }
 }
 
 @Test func changingHowFarTheViewTurnsLeavesItWhereItIs() {
-    var viewport = ViewportController(settings: Settings())
-    viewport.recenter(HeadPose())
-    viewport.track(pose: HeadPose(yaw: 0.3))
+    var viewport = doubling()
+    turn(&viewport, from: HeadPose(), to: HeadPose(yaw: 0.3), speed: 2)
     let before = viewYaw(viewport)
 
     viewport.setGain(3)
-    viewport.track(pose: HeadPose(yaw: 0.3))
+    viewport.track(pose: HeadPose(yaw: 0.3), dt: 1 / 90)
     #expect(abs(viewYaw(viewport) - before) < 1e-4)
 
-    // From there on, the head turns it three times as far.
-    viewport.track(pose: HeadPose(yaw: 0.4))
-    #expect(abs(viewYaw(viewport) - (before + 0.3)) <= steadyRadius + 1e-4)
+    // From there on, quick turns go nearly three times as far.
+    turn(&viewport, from: HeadPose(yaw: 0.3), to: HeadPose(yaw: 0.5), speed: 2)
+    #expect(viewYaw(viewport) - before > 0.45 && viewYaw(viewport) - before <= 0.6 + steadyRadius)
+}
+
+@Test func atOneTimesTheViewFollowsTheHeadExactlyEvenAfterNoddingPastVertical() {
+    var viewport = ViewportController(settings: Settings())
+    viewport.recenter(HeadPose())
+    turn(&viewport, from: HeadPose(), to: HeadPose(yaw: 0.4, pitch: 1.65), speed: 3)
+    turn(&viewport, from: HeadPose(yaw: 0.4, pitch: 1.65), to: HeadPose(yaw: 0.2, pitch: 0.1), speed: 3)
+    #expect(abs(viewYaw(viewport) - 0.2) <= steadyRadius + 1e-4)
+    #expect(abs(viewPitch(viewport) - 0.1) <= steadyRadius + 1e-4)
 }
 
 @Test func recenteringPutsTheViewStraightAheadWhateverTheGain() {
-    var settings = Settings()
-    settings.headGain = 2
-    var viewport = ViewportController(settings: settings)
-    viewport.recenter(HeadPose())
-    viewport.track(pose: HeadPose(yaw: 0.5, pitch: -0.2))
+    var viewport = doubling()
+    turn(&viewport, from: HeadPose(), to: HeadPose(yaw: 0.5, pitch: -0.2), speed: 2)
     viewport.recenter(HeadPose(yaw: 0.5, pitch: -0.2))
-    viewport.track(pose: HeadPose(yaw: 0.5, pitch: -0.2))
+    viewport.track(pose: HeadPose(yaw: 0.5, pitch: -0.2), dt: 1 / 90)
     #expect(abs(viewYaw(viewport)) < 1e-5 && abs(viewPitch(viewport)) < 1e-5)
 }

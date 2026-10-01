@@ -48,21 +48,38 @@ public let maxHeadGain: Float = 3
 /// movement is multiplied.
 private let maxViewPitch: Float = .pi / 2 - 0.01
 
+// Head movement is multiplied only as fast as the head turns: up to
+// `slowTurn` not at all, so tremor, the pulse and slowly reading along a
+// line leave the canvas still in the room, and from `fastTurn` on fully,
+// for a deliberate look elsewhere.
+let slowTurn: Float = 0.15  // rad/s, about 9°/s
+let fastTurn: Float = 0.8  // rad/s, about 46°/s
+// How quickly the turning speed is followed, so a single noisy sample does
+// not change how far the view turns.
+private let turnSpeedSmoothing: Float = 0.05  // seconds
+
 /// Turns head pose into how the head is turned in the room.
 public struct ViewportController: Sendable {
     private var center = HeadPose()
     private var leash = SoftLeash()
     /// The turn and nod from straight ahead, as the head made them.
     private var headOffset = SIMD2<Float>.zero
+    /// How much further than the head the view has been turned and nodded
+    /// by quick head movements, since straight ahead was last set.
+    private var extraTurn = SIMD2<Float>.zero
+    /// How fast the head turns and nods, smoothed, in rad/s.
+    private var turnSpeed: Float = 0
     private var offsetYaw: Float = 0
     private var offsetPitch: Float = 0
     private var offsetRoll: Float = 0
     private var initialized = false
     public var followsRoll: Bool
-    /// How many times further the view turns and nods than the head, so a
-    /// wide canvas can be looked round with less head movement. At 1 the
-    /// canvas stays put in the room; above it, it slides the other way as
-    /// the head turns. Tilt is never multiplied.
+    /// How many times further the view turns and nods than the head when
+    /// it turns quickly, so a wide canvas can be looked round with less
+    /// head movement. Slow movement is never multiplied, nor is tilt. At 1
+    /// the canvas stays put in the room; above it, it slides the other way
+    /// as the head turns quickly, and straight ahead no longer has to be
+    /// where the head points straight, until recentered.
     public private(set) var gain: Float
 
     public init(settings: Settings) {
@@ -75,17 +92,16 @@ public struct ViewportController: Sendable {
         settings.headGain = gain
     }
 
-    /// Changes how much head movement is multiplied, keeping the view where
-    /// it is: from here on, the head turns it by `gain` times as much.
+    /// Changes how much quick head movement is multiplied from here on;
+    /// the view stays where it is.
     public mutating func setGain(_ gain: Float) {
-        let gain = clampedHeadGain(gain)
-        guard gain != self.gain else { return }
-        self.gain = gain
-        guard initialized else { return }
-        let rebased = SIMD2(offsetYaw, offsetPitch) / gain
-        center.yaw = wrapAngle(center.yaw + headOffset.x - rebased.x)
-        center.pitch += headOffset.y - rebased.y
-        headOffset = rebased
+        self.gain = clampedHeadGain(gain)
+    }
+
+    /// How many times further than the head the view turns at the head's
+    /// present speed.
+    private var currentGain: Float {
+        1 + (gain - 1) * smoothstep(slowTurn, fastTurn, turnSpeed)
     }
 
     /// Makes `pose` the new straight ahead. Only the turn and nod are
@@ -97,19 +113,34 @@ public struct ViewportController: Sendable {
         offsetPitch = 0
         offsetRoll = 0
         headOffset = .zero
+        extraTurn = .zero
+        turnSpeed = 0
         leash.reset(.zero)
         initialized = true
     }
 
-    /// Follows the head to `pose`. The canvas turns with the head exactly,
-    /// times `gain`, as any delay makes it lag behind, apart from wobble
-    /// within `steadyRadius` of the view.
-    public mutating func track(pose: HeadPose) {
+    /// Follows the head to `pose`, `dt` seconds after the last one. The
+    /// canvas turns with the head exactly, and further while it turns
+    /// quickly, as any delay makes it lag behind, apart from wobble within
+    /// `steadyRadius` of the view.
+    public mutating func track(pose: HeadPose, dt: Float = 1 / 90) {
         if !initialized {
             recenter(pose)
         }
-        headOffset = SIMD2(wrapAngle(pose.yaw - center.yaw), pose.pitch - center.pitch)
-        let turned = headOffset * gain
+        let offset = SIMD2(wrapAngle(pose.yaw - center.yaw), pose.pitch - center.pitch)
+        var moved = offset - headOffset
+        moved.x = wrapAngle(moved.x)
+        headOffset = offset
+        if dt > 0 {
+            let follow = 1 - exp(-dt / turnSpeedSmoothing)
+            turnSpeed += (simd_length(moved) / dt - turnSpeed) * follow
+        }
+        extraTurn += moved * (currentGain - 1)
+        extraTurn.x = wrapAngle(extraTurn.x)
+        // What would nod the view past straight up or down is dropped, not
+        // kept to pull it back later; the head alone may still go past.
+        extraTurn.y = min(max(extraTurn.y, min(0, -maxViewPitch - offset.y)), max(0, maxViewPitch - offset.y))
+        let turned = offset + extraTurn
         let raw = SIMD3(wrapAngle(turned.x), min(max(turned.y, -maxViewPitch), maxViewPitch), wrapAngle(pose.roll))
         let steady = leash.follow(raw, radius: steadyRadius)
         (offsetYaw, offsetPitch, offsetRoll) = (steady.x, steady.y, steady.z)
@@ -124,6 +155,7 @@ public struct ViewportController: Sendable {
     /// as it will be a moment later.
     public func headRotation(advancedBy turn: SIMD3<Float>) -> simd_float3x3 {
         let roll = followsRoll ? offsetRoll + turn.z : 0
+        let gain = currentGain
         let pitch = min(max(offsetPitch + turn.y * gain, -maxViewPitch), maxViewPitch)
         return rotationY(offsetYaw + turn.x * gain) * rotationX(-pitch) * rotationZ(-roll)
     }
@@ -147,6 +179,11 @@ public struct ViewportController: Sendable {
         }
         return RoomView(headRotation: headRotation, tanHalfFov: SIMD2(tanX, tanX * aspect), panels: panels)
     }
+}
+
+private func smoothstep(_ edge0: Float, _ edge1: Float, _ x: Float) -> Float {
+    let t = min(max((x - edge0) / (edge1 - edge0), 0), 1)
+    return t * t * (3 - 2 * t)
 }
 
 private func clampedHeadGain(_ gain: Float) -> Float {
