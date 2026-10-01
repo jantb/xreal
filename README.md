@@ -60,12 +60,12 @@ glasses' optics focus, so the eyes aim and focus at the same distance. **Ambient
 edges out into the room, like a dark mirror set against them: nearly sharp
 at the edge, slowly blurrier and dimmer farther out, fading evenly to black.
 
-**Head Movement** turns the view up to three times further than the head
-while it turns quickly, to look round a wide canvas with less head
-movement. Slow movement, tremor and the pulse stay one to one, so the
-canvas holds still in the room; tilt is never multiplied. Above 1×,
-straight ahead can wander from where the head points, like a mouse with
-acceleration; recentering brings it back. **Zoom Out on Quick Turns**
+**Head Movement** turns the view up to three times further than the head,
+to look round a wide canvas with less head movement; tilt is never
+multiplied. Each head direction keeps one place on the canvas, however
+slowly or quickly the head got there, while the wobble of holding still,
+tremor and the pulse going back and forth, is left one to one, so the
+canvas holds still in the room. **Zoom Out on Quick Turns**
 widens the view during a quick turn, up to half as much canvas again each
 way, to see where the turn is heading, and zooms back in as the head
 slows, landing sharp at the zoom it had.

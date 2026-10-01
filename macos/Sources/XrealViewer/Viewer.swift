@@ -401,7 +401,7 @@ struct ViewerState: Sendable {
             cursorPoint.map { room.shows($0, scale: scale, margin: margin) } ?? false
         }
         // And while the head turns quickly; whichever wants more wins.
-        let turnScale = turnZoom.update(speed: viewport.turnSpeed, enabled: settings.zoomOutWhenTurning, dt: dt)
+        let turnScale = turnZoom.update(speed: viewport.headSpeed, enabled: settings.zoomOutWhenTurning, dt: dt)
         let scale = min(cursorScale, turnScale)
         room.tanHalfFov /= scale
         // Each eye as the glasses' calibration describes it, zoomed out with

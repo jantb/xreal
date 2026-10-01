@@ -352,7 +352,7 @@ private struct ViewSection: View {
                     value: Binding(get: { model.settings.headGain }, set: { model.perform(.setHeadGain($0)) }),
                     in: 1...maxHeadGain, step: 0.25)
                 Text(
-                    "Quick head turns turn the view this many times further, to look round a wide canvas with less head movement. Slow movement and holding still stay one to one, so the canvas keeps still; tilt is never multiplied. Above 1×, straight ahead can wander from where your head points: recenter to bring it back."
+                    "Turns the view this many times further than your head, to look round a wide canvas with less head movement; tilt is never multiplied. Each head direction keeps its place on the canvas however slowly you turn, while the wobble of holding still is left one to one, so the canvas keeps still."
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }

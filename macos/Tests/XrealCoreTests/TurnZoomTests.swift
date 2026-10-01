@@ -19,7 +19,7 @@ private func run(_ zoom: inout TurnZoom, speed: Float, seconds: Float, enabled: 
 
 @Test func slowMovementNeverZooms() {
     var zoom = TurnZoom()
-    run(&zoom, speed: slowTurn, seconds: 2)
+    run(&zoom, speed: 0.1, seconds: 2)
     #expect(zoom.scale == 1)
 }
 

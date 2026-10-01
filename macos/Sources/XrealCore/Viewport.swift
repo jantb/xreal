@@ -48,15 +48,19 @@ public let maxHeadGain: Float = 3
 /// movement is multiplied.
 private let maxViewPitch: Float = .pi / 2 - 0.01
 
-// Head movement is multiplied only as fast as the head turns: up to
-// `slowTurn` not at all, so tremor, the pulse and slowly reading along a
-// line leave the canvas still in the room, and from `fastTurn` on fully,
-// for a deliberate look elsewhere.
-let slowTurn: Float = 0.15  // rad/s, about 9°/s
-let fastTurn: Float = 0.8  // rad/s, about 46°/s
-// How quickly the turning speed is followed, so a single noisy sample does
-// not change how far the view turns.
-private let turnSpeedSmoothing: Float = 0.05  // seconds
+// Head movement is multiplied only while the head keeps turning one way,
+// however slowly. Holding still, the head's tremor and the pulse's jolts
+// of a few pixels go back and forth and average out to under `slowTurn`,
+// so the canvas stays still in the room; from `fastTurn`, a slow pan of
+// under a degree and a half a second, the head is multiplied fully.
+let slowTurn: Float = 0.01  // rad/s, about 0.6°/s
+let fastTurn: Float = 0.025  // rad/s, about 1.4°/s
+// How long the head's turning is averaged over, which back-and-forth
+// wobble cancels out of.
+private let turnSpeedSmoothing: Float = 0.3  // seconds
+// How long the head's speed, either way, is smoothed over: briefly, so it
+// follows a quick turn starting and stopping at once.
+private let headSpeedSmoothing: Float = 0.05  // seconds
 
 /// Turns head pose into how the head is turned in the room.
 public struct ViewportController: Sendable {
@@ -64,22 +68,30 @@ public struct ViewportController: Sendable {
     private var leash = SoftLeash()
     /// The turn and nod from straight ahead, as the head made them.
     private var headOffset = SIMD2<Float>.zero
-    /// How much further than the head the view has been turned and nodded
-    /// by quick head movements, since straight ahead was last set.
+    /// How much further than the head the view is turned and nodded:
+    /// `gain - 1` times the head's offset once anchored, less while slow
+    /// movement has left it behind.
     private var extraTurn = SIMD2<Float>.zero
-    /// How fast the head turns and nods, smoothed, in rad/s.
-    public private(set) var turnSpeed: Float = 0
+    /// How fast and which way the head keeps turning and nodding, in rad/s.
+    private var turning = SIMD2<Float>.zero
+    /// How fast the head keeps turning and nodding one way, in rad/s.
+    private var turnSpeed: Float { simd_length(turning) }
+    /// How fast the head is turning and nodding just now, whichever way,
+    /// in rad/s.
+    public private(set) var headSpeed: Float = 0
     private var offsetYaw: Float = 0
     private var offsetPitch: Float = 0
     private var offsetRoll: Float = 0
     private var initialized = false
     public var followsRoll: Bool
-    /// How many times further the view turns and nods than the head when
-    /// it turns quickly, so a wide canvas can be looked round with less
-    /// head movement. Slow movement is never multiplied, nor is tilt. At 1
-    /// the canvas stays put in the room; above it, it slides the other way
-    /// as the head turns quickly, and straight ahead no longer has to be
-    /// where the head points straight, until recentered.
+    /// How many times further the view turns and nods than the head, so a
+    /// wide canvas can be looked round with less head movement. Tilt is
+    /// never multiplied. At 1 the canvas stays put in the room; above it,
+    /// it slides the other way as the head turns. Each head direction
+    /// keeps one place on the canvas, however slowly or quickly the head
+    /// got there; only the wobble of holding still is not multiplied, so
+    /// the canvas keeps still then, and what that leaves out of place is
+    /// taken back by the next turn.
     public private(set) var gain: Float
 
     public init(settings: Settings) {
@@ -92,8 +104,8 @@ public struct ViewportController: Sendable {
         settings.headGain = gain
     }
 
-    /// Changes how much quick head movement is multiplied from here on;
-    /// the view stays where it is.
+    /// Changes how much head movement is multiplied. The view stays where
+    /// it is and moves to its new place with the next quick turns.
     public mutating func setGain(_ gain: Float) {
         self.gain = clampedHeadGain(gain)
     }
@@ -114,7 +126,8 @@ public struct ViewportController: Sendable {
         offsetRoll = 0
         headOffset = .zero
         extraTurn = .zero
-        turnSpeed = 0
+        turning = .zero
+        headSpeed = 0
         leash.reset(.zero)
         initialized = true
     }
@@ -133,9 +146,25 @@ public struct ViewportController: Sendable {
         headOffset = offset
         if dt > 0 {
             let follow = 1 - exp(-dt / turnSpeedSmoothing)
-            turnSpeed += (simd_length(moved) / dt - turnSpeed) * follow
+            turning += (moved / dt - turning) * follow
+            headSpeed += (simd_length(moved) / dt - headSpeed) * (1 - exp(-dt / headSpeedSmoothing))
         }
-        extraTurn += moved * (currentGain - 1)
+        let quick = smoothstep(slowTurn, fastTurn, turnSpeed)
+        extraTurn += moved * (quick * (gain - 1))
+        // Back towards its anchored place, only as far as turning hides it:
+        // never while the head holds still. At most as fast as the
+        // multiplying itself, so the view never turns against the head: at
+        // worst it goes one to one for a moment, or twice as far ahead
+        // again. Not with the head turned round behind, where the anchored
+        // place, multiplied from a turn that wraps, jumps.
+        var outOfPlace = offset * (gain - 1) - extraTurn
+        outOfPlace.x = wrapAngle(outOfPlace.x)
+        let facing = 1 - smoothstep(0.6 * .pi, 0.75 * .pi, abs(offset.x))
+        let most = simd_length(moved) * quick * (gain - 1) * facing
+        let distance = simd_length(outOfPlace)
+        if distance > 0 {
+            extraTurn += outOfPlace * min(1, most / distance)
+        }
         extraTurn.x = wrapAngle(extraTurn.x)
         // What would nod the view past straight up or down is dropped, not
         // kept to pull it back later; the head alone may still go past.

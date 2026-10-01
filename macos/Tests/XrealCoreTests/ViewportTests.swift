@@ -155,10 +155,10 @@ private func doubling() -> ViewportController {
     #expect(viewPitch(viewport) > 0.15 && viewPitch(viewport) <= 0.2 + steadyRadius)
 }
 
-@Test func aSlowHeadTurnTurnsTheViewOnlyAsFarAsTheHead() {
+@Test func aSlowHeadTurnEndsWhereAQuickOneWould() {
     var viewport = doubling()
-    turn(&viewport, from: HeadPose(), to: HeadPose(yaw: 0.1), speed: 0.05)
-    #expect(abs(viewYaw(viewport) - 0.1) <= steadyRadius + 1e-4)
+    turn(&viewport, from: HeadPose(), to: HeadPose(yaw: 0.1), speed: 0.03)
+    #expect(abs(viewYaw(viewport) - 0.2) < 0.01)
 }
 
 @Test func headTremorDoesNotMoveTheCanvasEvenWhenHeadMovementIsMultiplied() {
@@ -190,9 +190,21 @@ private func doubling() -> ViewportController {
     viewport.track(pose: HeadPose(yaw: 0.3), dt: 1 / 90)
     #expect(abs(viewYaw(viewport) - before) < 1e-4)
 
-    // From there on, quick turns go nearly three times as far.
-    turn(&viewport, from: HeadPose(yaw: 0.3), to: HeadPose(yaw: 0.5), speed: 2)
-    #expect(viewYaw(viewport) - before > 0.45 && viewYaw(viewport) - before <= 0.6 + steadyRadius)
+    // Quick turns from there on take it to where three times says.
+    turn(&viewport, from: HeadPose(yaw: 0.3), to: HeadPose(yaw: 0.6), speed: 2)
+    turn(&viewport, from: HeadPose(yaw: 0.6), to: HeadPose(yaw: 0.3), speed: 2)
+    #expect(abs(viewYaw(viewport) - 0.9) < 0.03)
+}
+
+@Test func eachHeadDirectionComesBackToTheSamePlaceOnTheCanvas() {
+    var viewport = doubling()
+    // Out quickly, back slowly, out slowly, back quickly.
+    turn(&viewport, from: HeadPose(), to: HeadPose(yaw: 0.3, pitch: 0.1), speed: 2)
+    turn(&viewport, from: HeadPose(yaw: 0.3, pitch: 0.1), to: HeadPose(), speed: 0.03)
+    #expect(abs(viewYaw(viewport)) < 0.01 && abs(viewPitch(viewport)) < 0.01)
+    turn(&viewport, from: HeadPose(), to: HeadPose(yaw: -0.2), speed: 0.03)
+    turn(&viewport, from: HeadPose(yaw: -0.2), to: HeadPose(), speed: 2)
+    #expect(abs(viewYaw(viewport)) < 0.01)
 }
 
 @Test func atOneTimesTheViewFollowsTheHeadExactlyEvenAfterNoddingPastVertical() {
@@ -210,4 +222,25 @@ private func doubling() -> ViewportController {
     viewport.recenter(HeadPose(yaw: 0.5, pitch: -0.2))
     viewport.track(pose: HeadPose(yaw: 0.5, pitch: -0.2), dt: 1 / 90)
     #expect(abs(viewYaw(viewport)) < 1e-5 && abs(viewPitch(viewport)) < 1e-5)
+}
+
+@Test func aQuickTurnRightRoundNeverThrowsTheViewBackOrHalfATurn() {
+    var settings = Settings()
+    settings.headGain = 2.5
+    var viewport = ViewportController(settings: settings)
+    viewport.recenter(HeadPose())
+    viewport.track(pose: HeadPose(), dt: 1 / 90)
+    // Round past straight behind, a frame at a time.
+    var yaw: Float = 0
+    var lastView = viewYaw(viewport)
+    for _ in 0..<300 {
+        yaw = wrapAngle(yaw + 2 / 90)
+        viewport.track(pose: HeadPose(yaw: yaw), dt: 1 / 90)
+        let view = viewYaw(viewport)
+        // Every frame turns the view the head's way, and never more than
+        // twice as far again as the multiplying.
+        let step = wrapAngle(view - lastView)
+        #expect(step > -steadyRadius && step < (2 * 2.5 - 1) * 2 / 90 + steadyRadius, "head \(yaw) step \(step)")
+        lastView = view
+    }
 }
