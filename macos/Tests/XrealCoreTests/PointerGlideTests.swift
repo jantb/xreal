@@ -79,3 +79,62 @@ private let lookedAt = SIMD2<Float>(4000, 900)
     }
     #expect(simd_distance(cursor, lookedAt) < 1)
 }
+
+@Test func macOSRoundingWherePointerIsPutDoesNotStopTheGlide() {
+    var glide = PointerGlide()
+    var now = 0.0
+    var cursor = leftBehind
+    for _ in 0..<Int(1.5 * 90) {
+        now += Double(dt)
+        if let move = glide.update(cursor: cursor, inView: false, target: lookedAt, enabled: true, now: now, dt: dt) {
+            cursor = move.rounded(.toNearestOrAwayFromZero)
+        }
+    }
+    #expect(simd_distance(cursor, lookedAt) < 1)
+}
+
+@Test func thePointerKeepsUpWithTheGazeWhileTheHeadTurnsQuickly() {
+    var glide = PointerGlide()
+    var now = 0.0
+    var cursor = leftBehind
+    var target = lookedAt
+    var furthest: Float = 0
+    for frame in 0..<Int(2 * 90) {
+        now += Double(dt)
+        // The gaze sweeping along the canvas at 6000 points a second, as
+        // with head movement multiplied.
+        target.x += 6000 * dt
+        let inView = simd_distance(cursor, target) < 800
+        if let move = glide.update(cursor: cursor, inView: inView, target: target, enabled: true, now: now, dt: dt) {
+            cursor = move
+        }
+        if frame > 45 {
+            furthest = max(furthest, simd_distance(cursor, target))
+        }
+    }
+    // With the gaze, well inside the view, all the way.
+    #expect(furthest < 100)
+}
+
+@Test func aSuddenJumpInGazeNeverFlingsThePointerOffTheCanvas() {
+    var glide = PointerGlide()
+    var now = 0.0
+    var cursor = leftBehind
+    let bounds = (min: SIMD2<Float>(0, 0), max: SIMD2<Float>(5751, 2159))
+    var target = SIMD2<Float>(1000, 900)
+    for frame in 0..<Int(2.5 * 90) {
+        now += Double(dt)
+        // Where the viewer looks jumps across the canvas at once.
+        if frame == 60 {
+            target = SIMD2(5600, 900)
+        }
+        if let move = glide.update(
+            cursor: cursor, inView: false, target: target, enabled: true, now: now, dt: dt, bounds: bounds)
+        {
+            cursor = move
+            #expect(cursor.x >= bounds.min.x && cursor.x <= bounds.max.x)
+            #expect(simd_distance(cursor, target) < 4700)
+        }
+    }
+    #expect(simd_distance(cursor, target) < 1)
+}

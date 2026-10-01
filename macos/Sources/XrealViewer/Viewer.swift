@@ -394,7 +394,10 @@ struct ViewerState: Sendable {
         pointerMove = pointerGlide.update(
             cursor: onCanvas.map { point, _ in SIMD2(Float(point.x), Float(point.y)) }, inView: inView ?? true,
             target: gaze.flatMap(globalPoint(ofCanvas:)),
-            enabled: settings.pointerFollowsGaze && !settings.followCursor, now: now, dt: dt
+            enabled: settings.pointerFollowsGaze && !settings.followCursor, now: now, dt: dt,
+            bounds: canvasBounds.map {
+                (SIMD2(Float($0.minX), Float($0.minY)), SIMD2(Float($0.maxX) - 1, Float($0.maxY) - 1))
+            }
         ).map { CGPoint(x: CGFloat($0.x), y: CGFloat($0.y)) }
         if settings.prediction {
             let end = snapshot.predict(now: now, lead: lead + scanoutTime)
