@@ -78,7 +78,7 @@ private let locatorFadeIn: Float = 0.15
 // The pointer counts as in view while its tip is, and when left outside is
 // brought back to the very border, only just in.
 private let pointerInViewMargin: Float = 1
-private let pointerEdgeMargin: Float = 0.97
+private let pointerEdgeMargin: Float = 0.995
 // How far the dashboard and the pinned window hang, as a share of how far
 // they would hang on the canvas's own surface.
 private let overheadNearness: Float = 0.8
