@@ -356,6 +356,7 @@ private struct ViewSection: View {
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }
+            Toggle("Zoom Out on Quick Turns", isOn: model.toggle(\.settings.zoomOutWhenTurning, .toggleTurnZoom))
             Toggle("Predict Head Motion", isOn: model.toggle(\.settings.prediction, .togglePrediction))
             VStack(alignment: .leading) {
                 LabeledContent("Extra Prediction Lead") {

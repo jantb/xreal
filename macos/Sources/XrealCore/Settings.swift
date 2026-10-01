@@ -56,6 +56,8 @@ public struct Settings: Equatable, Sendable {
     /// How many times further the view turns and nods than the head, from
     /// 1 to `maxHeadGain`.
     public var headGain: Float = 1
+    /// Zooms out while the head turns quickly.
+    public var zoomOutWhenTurning = false
     /// Zoom out while the mouse moves outside the view.
     public var followCursor = true
     /// The radius the canvas bends with when curved, as a multiple of its
@@ -150,6 +152,7 @@ public struct Settings: Equatable, Sendable {
                     settings.headGain = min(max(gain, 1), maxHeadGain)
                 }
             case "follow_cursor": parse(value, into: &settings.followCursor)
+            case "zoom_out_when_turning": parse(value, into: &settings.zoomOutWhenTurning)
             case "lens_correction": parse(value, into: &settings.lensCorrection)
             case "metres_per_room_unit":
                 if let metres = Float(value), metres.isFinite, metres > 0 {
@@ -217,6 +220,7 @@ public struct Settings: Equatable, Sendable {
             "follow_roll=\(followRoll)",
             "head_gain=\(headGain)",
             "follow_cursor=\(followCursor)",
+            "zoom_out_when_turning=\(zoomOutWhenTurning)",
             "curve_radius=\(curveRadius)",
             "lens_correction=\(lensCorrection)",
             "metres_per_room_unit=\(metresPerRoomUnit)",

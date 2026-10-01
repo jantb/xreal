@@ -14,6 +14,7 @@ import simd
         curved: true)
     settings.followRoll = false
     settings.headGain = 2.5
+    settings.zoomOutWhenTurning = true
     settings.followCursor = false
 
     var loaded = Settings.parse(settings.serialize())

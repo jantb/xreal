@@ -126,6 +126,7 @@ enum ViewerCommand {
     /// How many times further the view turns than the head, 1 or more.
     case setHeadGain(Float)
     case toggleFollowCursor
+    case toggleTurnZoom
     case toggleDiagnostics
     case setLatencyTrim(Float)
     case setCurveRadius(Float)
@@ -187,6 +188,7 @@ struct ViewerState: Sendable {
     var settings: Settings
     var viewport: ViewportController
     var cursorFollow = CursorFollow()
+    var turnZoom = TurnZoom()
     var drift = DriftLearner()
     var lastDrift: DriftObservation?
     var trackingSession: UInt64 = 0
@@ -392,12 +394,15 @@ struct ViewerState: Sendable {
         // Zoom out while the mouse moves where it cannot be seen; behind the
         // viewer no zoom would show it.
         let cursorPoint = cursor.flatMap(roomPoint(ofCursor:)).flatMap { room.isAhead($0) ? $0 : nil }
-        let scale = cursorFollow.update(
+        let cursorScale = cursorFollow.update(
             cursor: cursor.map { SIMD2(Float($0.x), Float($0.y)) }.flatMap { cursorPoint == nil ? nil : $0 },
             enabled: settings.followCursor, now: now, dt: dt
         ) { scale, margin in
             cursorPoint.map { room.shows($0, scale: scale, margin: margin) } ?? false
         }
+        // And while the head turns quickly; whichever wants more wins.
+        let turnScale = turnZoom.update(speed: viewport.turnSpeed, enabled: settings.zoomOutWhenTurning, dt: dt)
+        let scale = min(cursorScale, turnScale)
         room.tanHalfFov /= scale
         // Each eye as the glasses' calibration describes it, zoomed out with
         // the rest of the view.
@@ -843,6 +848,7 @@ final class FrameLoop: @unchecked Sendable {
                 state.viewport.setGain(gain)
                 state.settings.headGain = state.viewport.gain
             case .toggleFollowCursor: state.settings.followCursor.toggle()
+            case .toggleTurnZoom: state.settings.zoomOutWhenTurning.toggle()
             case .toggleDiagnostics: state.settings.diagnosticsVisible.toggle()
             case .setLatencyTrim(let ms): state.settings.latencyTrimMs = min(max(ms, 0), maxLatencyTrimMs)
             case .toggleLensCorrection: state.settings.lensCorrection.toggle()

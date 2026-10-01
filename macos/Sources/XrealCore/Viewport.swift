@@ -68,7 +68,7 @@ public struct ViewportController: Sendable {
     /// by quick head movements, since straight ahead was last set.
     private var extraTurn = SIMD2<Float>.zero
     /// How fast the head turns and nods, smoothed, in rad/s.
-    private var turnSpeed: Float = 0
+    public private(set) var turnSpeed: Float = 0
     private var offsetYaw: Float = 0
     private var offsetPitch: Float = 0
     private var offsetRoll: Float = 0
@@ -181,7 +181,7 @@ public struct ViewportController: Sendable {
     }
 }
 
-private func smoothstep(_ edge0: Float, _ edge1: Float, _ x: Float) -> Float {
+func smoothstep(_ edge0: Float, _ edge1: Float, _ x: Float) -> Float {
     let t = min(max((x - edge0) / (edge1 - edge0), 0), 1)
     return t * t * (3 - 2 * t)
 }

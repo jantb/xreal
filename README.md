@@ -65,7 +65,10 @@ while it turns quickly, to look round a wide canvas with less head
 movement. Slow movement, tremor and the pulse stay one to one, so the
 canvas holds still in the room; tilt is never multiplied. Above 1×,
 straight ahead can wander from where the head points, like a mouse with
-acceleration; recentering brings it back.
+acceleration; recentering brings it back. **Zoom Out on Quick Turns**
+widens the view during a quick turn, up to half as much canvas again each
+way, to see where the turn is heading, and zooms back in as the head
+slows, landing sharp at the zoom it had.
 
 Above the canvas, where you see it by looking up, hangs a row tilted to face
 you: a dashboard updated ten times a second (time and thermal state, CPU per
