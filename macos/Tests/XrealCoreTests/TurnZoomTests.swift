@@ -18,8 +18,8 @@ private func run(_ zoom: inout TurnZoom, speed: Float, seconds: Float, enabled: 
     // Gliding out: gently at first...
     run(&zoom, speed: 3, seconds: 0.1)
     #expect(zoom.scale > 0.85 && zoom.scale < 1)
-    // ...and the whole canvas in view within a second and a half.
-    run(&zoom, speed: 3, seconds: 1.4)
+    // ...and the whole canvas in view after about two seconds.
+    run(&zoom, speed: 3, seconds: 2.9)
     #expect(abs(zoom.scale - wholeCanvas) < 0.01)
 }
 

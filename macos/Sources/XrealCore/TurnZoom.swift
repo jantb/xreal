@@ -5,9 +5,9 @@ import Foundation
 private let zoomFrom: Float = 0.15  // rad/s, about 9°/s
 private let zoomFully: Float = 0.8  // rad/s, about 46°/s
 // How quickly it glides, as a spring that settles without overshooting:
-// out gently, most of the way in about 0.8 s, and back in within 0.4 s,
-// to land sharp.
-private let zoomOutRate: Float = 6  // 1/s
+// out gently, most of the way in about 2 s, and back in within 0.4 s, to
+// land sharp.
+private let zoomOutRate: Float = 2.4  // 1/s
 private let zoomInRate: Float = 12  // 1/s
 // The furthest out it zooms, however large the canvas or however far to
 // its side the head points: past this the view's edges stretch too far.
