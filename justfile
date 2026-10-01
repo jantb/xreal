@@ -31,6 +31,8 @@ uninstall: quit
 # Quit the app cleanly so it saves its settings
 quit:
     osascript -e 'if application id "{{ bundle_id }}" is running then tell application id "{{ bundle_id }}" to quit'
+    @# Gone before the next copy opens, or `open` only wakes this one up.
+    @for _ in $(seq 50); do pgrep -f "/Contents/MacOS/XrealViewer$" >/dev/null || exit 0; sleep 0.2; done; echo "XREAL Viewer is still running" >&2; exit 1
 
 # Run the release bundle from the build folder without installing
 run: bundle quit
