@@ -429,7 +429,7 @@ public struct RoomScreen: Equatable, Sendable {
                 if evenSize {
                     // The edge moves as the growth does: a few rounds settle it.
                     for _ in 0..<6 {
-                        grow = 2 / (1 + max(edgeRow(grow), 0) / rowRadius)
+                        grow = min(2 / (1 + max(edgeRow(grow), 0) / rowRadius), maxEvenGrowth)
                     }
                 }
                 let rise = mercatorRise(halfHeight * grow / columnRadius)
@@ -449,6 +449,11 @@ public struct RoomScreen: Equatable, Sendable {
             wrap: wrap)
     }
 }
+
+// Evening out text size grows the middle of a wrapped canvas by at most
+// this: on a tall one, sharing out all the shrinking at the top and bottom
+// would make the middle look zoomed in.
+private let maxEvenGrowth: Float = 1.05
 
 /// The angle up a Mercator map at `height` along it, both in radians: the
 /// map's rows crowd towards the poles by just as much as the circles they

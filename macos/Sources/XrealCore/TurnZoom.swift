@@ -4,8 +4,11 @@ import Foundation
 // panning along the canvas: only a quick look elsewhere zooms.
 private let zoomFrom: Float = 0.15  // rad/s, about 9°/s
 private let zoomFully: Float = 0.8  // rad/s, about 46°/s
-private let zoomOutTime: Float = 0.25  // seconds: a glide out rather than a jump
-private let zoomInTime: Float = 0.15  // seconds: nearly back in under half a second
+// How quickly it glides, as a spring that settles without overshooting:
+// out gently, most of the way in about 0.8 s, and back in within 0.4 s,
+// to land sharp.
+private let zoomOutRate: Float = 6  // 1/s
+private let zoomInRate: Float = 12  // 1/s
 // The furthest out it zooms, however large the canvas or however far to
 // its side the head points: past this the view's edges stretch too far.
 let widestTurnZoom: Float = 0.1
@@ -18,6 +21,8 @@ private let wholeCanvasMargin: Float = 0.95
 public struct TurnZoom: Sendable {
     /// How far the view is zoomed out, 1 meaning not, as `CursorFollow`'s.
     public private(set) var scale: Float = 1
+    /// How fast the scale is changing, per second.
+    private var rate: Float = 0
 
     public init() {}
 
@@ -28,11 +33,26 @@ public struct TurnZoom: Sendable {
         let quick = enabled ? smoothstep(zoomFrom, zoomFully, speed) : 0
         let wider = 1 / min(max(whole, widestTurnZoom), 1)
         let target = 1 / (1 + (wider - 1) * quick)
-        let time = target < scale ? zoomOutTime : zoomInTime
-        scale += (target - scale) * (1 - exp(-max(dt, 0) / time))
+        // Starts gently rather than at its fastest, so it glides out
+        // instead of lurching.
+        // Stepped exactly, so a late frame cannot throw it off.
+        let spring = target < scale ? zoomOutRate : zoomInRate
+        let t = max(dt, 0)
+        let away = scale - target
+        let carry = rate + spring * away
+        let decay = exp(-spring * t)
+        scale = target + (away + carry * t) * decay
+        rate = (rate - spring * carry * t) * decay
+        // A target easing back as the scale races towards it can carry it a
+        // little past; never past no zoom, nor further out than allowed.
+        if scale > 1 || scale < widestTurnZoom {
+            scale = min(max(scale, widestTurnZoom), 1)
+            rate = 0
+        }
         // Land exactly on no zoom, where the canvas has its own pixel density.
-        if abs(target - scale) < 1e-3 {
+        if abs(target - scale) < 1e-3, abs(rate) < 1e-2 {
             scale = target
+            rate = 0
         }
         return scale
     }

@@ -489,3 +489,14 @@ func aSurfaceBroughtNearerLooksTheSameFromBetweenTheEyes(wrapped: Bool) {
         #expect(abs(length(near) - 0.8 * length(far)) < 1e-4, "\(position)")
     }
 }
+
+@Test func evenedOutTextOnATallWrappedCanvasIsBarelyLargerInTheMiddle() {
+    func middlePixel(_ screen: RoomScreen) -> Float {
+        let middle = SIMD2(Float(screen.width) / 2, Float(screen.height) / 2)
+        return simd_distance(screen.roomPoint(ofPixel: middle), screen.roomPoint(ofPixel: middle + SIMD2(1, 0)))
+    }
+    let tall = RoomScreen(width: 7672, height: 4320, curved: true, spherical: true, evenSize: true)
+    let own = RoomScreen(width: 7672, height: 4320, spherical: true, evenSize: false)
+    #expect(middlePixel(tall) <= middlePixel(own) * 1.05 + 1e-6)
+    #expect(middlePixel(tall) > middlePixel(own))
+}

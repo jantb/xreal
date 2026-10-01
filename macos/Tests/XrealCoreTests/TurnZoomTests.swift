@@ -15,11 +15,11 @@ private func run(_ zoom: inout TurnZoom, speed: Float, seconds: Float, enabled: 
 
 @Test func aQuickTurnZoomsOutToShowTheWholeCanvas() {
     var zoom = TurnZoom()
-    run(&zoom, speed: 3, seconds: 0.2)
-    // Well on the way within a fifth of a second...
-    #expect(zoom.scale < 0.7)
-    // ...and the whole canvas in view soon after.
-    run(&zoom, speed: 3, seconds: 1)
+    // Gliding out: gently at first...
+    run(&zoom, speed: 3, seconds: 0.1)
+    #expect(zoom.scale > 0.85 && zoom.scale < 1)
+    // ...and the whole canvas in view within a second and a half.
+    run(&zoom, speed: 3, seconds: 1.4)
     #expect(abs(zoom.scale - wholeCanvas) < 0.01)
 }
 
@@ -51,4 +51,12 @@ private func run(_ zoom: inout TurnZoom, speed: Float, seconds: Float, enabled: 
     var zoom = TurnZoom()
     run(&zoom, speed: 3, seconds: 1, enabled: false)
     #expect(zoom.scale == 1)
+}
+
+@Test func aLateFrameDoesNotThrowTheZoomOff() {
+    var zoom = TurnZoom()
+    for _ in 0..<20 {
+        _ = zoom.update(speed: 3, enabled: true, whole: wholeCanvas, dt: 0.1)
+    }
+    #expect(zoom.scale >= wholeCanvas - 1e-3 && zoom.scale <= 1)
 }

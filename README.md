@@ -53,7 +53,8 @@ you as part of a sphere (**Wrap Around You**), where every pixel is the same
 distance away, faces you and keeps its shape, a little smaller towards the top
 and bottom; **Wrap Up and Down** blends from the curved shape to the full
 sphere. **Even Out Text Size** shares that shrinking out, a little
-larger in the middle and a little smaller at the edges. Edges are drawn
+larger in the middle, at most 5 %, so a tall canvas does not look zoomed
+in, and a little smaller at the edges. Edges are drawn
 smooth (four samples a pixel) and fade softly into the room (**Soft
 Edges**). **Viewing Distance** starts at, and snaps to, the 4 m where the
 glasses' optics focus, so the eyes aim and focus at the same distance. **Ambient Light** mirrors what is on the canvas near its
