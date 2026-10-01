@@ -60,6 +60,9 @@ public struct Settings: Equatable, Sendable {
     public var zoomOutWhenTurning = false
     /// Zoom out while the mouse moves outside the view.
     public var followCursor = true
+    /// With `followCursor` off, glide the mouse pointer to where the viewer
+    /// looks once it is left out of view.
+    public var pointerFollowsGaze = true
     /// The radius the canvas bends with when curved, as a multiple of its
     /// distance: 1 surrounds the viewer evenly, less bends it more, more
     /// bends it less.
@@ -155,6 +158,7 @@ public struct Settings: Equatable, Sendable {
                     settings.headGain = min(max(gain, 1), maxHeadGain)
                 }
             case "follow_cursor": parse(value, into: &settings.followCursor)
+            case "pointer_follows_gaze": parse(value, into: &settings.pointerFollowsGaze)
             case "zoom_out_when_turning": parse(value, into: &settings.zoomOutWhenTurning)
             case "lens_correction": parse(value, into: &settings.lensCorrection)
             case "metres_per_room_unit":
@@ -224,6 +228,7 @@ public struct Settings: Equatable, Sendable {
             "follow_roll=\(followRoll)",
             "head_gain=\(headGain)",
             "follow_cursor=\(followCursor)",
+            "pointer_follows_gaze=\(pointerFollowsGaze)",
             "zoom_out_when_turning=\(zoomOutWhenTurning)",
             "curve_radius=\(curveRadius)",
             "lens_correction=\(lensCorrection)",

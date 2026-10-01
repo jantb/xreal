@@ -16,6 +16,7 @@ import simd
     settings.headGain = 2.5
     settings.zoomOutWhenTurning = true
     settings.blackDesktop = false
+    settings.pointerFollowsGaze = false
     settings.followCursor = false
 
     var loaded = Settings.parse(settings.serialize())

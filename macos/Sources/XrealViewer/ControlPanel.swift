@@ -381,6 +381,16 @@ private struct ViewSection: View {
                 .disabled(!model.settings.prediction)
             Toggle("Draw Pointer Live", isOn: model.toggle(\.settings.livePointer, .toggleLivePointer))
             Toggle("Zoom Out to Show Cursor", isOn: model.toggle(\.settings.followCursor, .toggleFollowCursor))
+            VStack(alignment: .leading) {
+                Toggle(
+                    "Otherwise Bring the Pointer to Where You Look",
+                    isOn: model.toggle(\.settings.pointerFollowsGaze, .togglePointerFollowsGaze))
+                Text(
+                    "Once you look away and leave the pointer out of view, it glides to where you look. While it is in view, or while you move the mouse, it stays put."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            .disabled(model.settings.followCursor)
             Toggle("Sharpen Text", isOn: model.toggle(\.settings.sharpFiltering, .toggleSharpFiltering))
             Toggle("Soft Edges", isOn: model.toggle(\.settings.softEdges, .toggleSoftEdges))
             VStack(alignment: .leading) {

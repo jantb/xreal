@@ -75,6 +75,8 @@ private let desktopBeforeKey = "canvasDesktopPictureBefore"
 // glasses pixels, and how far zoomed out it takes to show it fully.
 private let locatorRadius: Float = 40
 private let locatorFadeIn: Float = 0.15
+// The pointer counts as in view inside this part of the view.
+private let pointerInViewMargin: Float = 0.9
 // How far the dashboard and the pinned window hang, as a share of how far
 // they would hang on the canvas's own surface.
 private let overheadNearness: Float = 0.8
@@ -134,6 +136,7 @@ enum ViewerCommand {
     /// How many times further the view turns than the head, 1 or more.
     case setHeadGain(Float)
     case toggleFollowCursor
+    case togglePointerFollowsGaze
     case toggleTurnZoom
     case toggleDiagnostics
     case setLatencyTrim(Float)
@@ -198,6 +201,10 @@ struct ViewerState: Sendable {
     var viewport: ViewportController
     var cursorFollow = CursorFollow()
     var turnZoom = TurnZoom()
+    var pointerGlide = PointerGlide()
+    /// Where to move the mouse pointer to after the latest frame, if
+    /// anywhere, in global points.
+    var pointerMove: CGPoint?
     var drift = DriftLearner()
     var lastDrift: DriftObservation?
     var trackingSession: UInt64 = 0
@@ -377,6 +384,18 @@ struct ViewerState: Sendable {
         }
         viewport.track(pose: pose, dt: dt)
         var room = roomView(now: now, dt: dt, output: output, frameSizes: frameSizes, cursor: cursor, extras: extras)
+        // Without zooming out to show the pointer, it is brought along to
+        // where the viewer looks instead, once left out of view.
+        let onCanvas = cursor.flatMap { point in canvasPoint(ofCursor: point).map { (point, $0) } }
+        let inView = onCanvas.map { _, pixel in
+            let point = settings.canvas.roomPoint(ofPixel: pixel, curveRadius: settings.curveRadius)
+            return room.isAhead(point) && room.shows(point, scale: 1, margin: pointerInViewMargin)
+        }
+        pointerMove = pointerGlide.update(
+            cursor: onCanvas.map { point, _ in SIMD2(Float(point.x), Float(point.y)) }, inView: inView ?? true,
+            target: gaze.flatMap(globalPoint(ofCanvas:)),
+            enabled: settings.pointerFollowsGaze && !settings.followCursor, now: now, dt: dt
+        ).map { CGPoint(x: CGFloat($0.x), y: CGFloat($0.y)) }
         if settings.prediction {
             let end = snapshot.predict(now: now, lead: lead + scanoutTime)
             let turn = SIMD3(wrapAngle(end.yaw - pose.yaw), end.pitch - pose.pitch, wrapAngle(end.roll - pose.roll))
@@ -539,6 +558,16 @@ struct ViewerState: Sendable {
             Float((point.y - bounds.minY) / bounds.height) * Float(canvas.height))
     }
 
+    /// Where the canvas's `pixel`, in its points from the top-left corner, is
+    /// in global points.
+    private func globalPoint(ofCanvas pixel: SIMD2<Float>) -> SIMD2<Float>? {
+        guard let bounds = canvasBounds else { return nil }
+        let canvas = settings.canvas
+        return SIMD2(
+            Float(bounds.minX) + pixel.x / Float(canvas.width) * Float(bounds.width),
+            Float(bounds.minY) + pixel.y / Float(canvas.height) * Float(bounds.height))
+    }
+
     /// Where the mouse at `point`, in global coordinates, is in the room, if
     /// it is on the canvas.
     private func roomPoint(ofCursor point: CGPoint) -> SIMD3<Float>? {
@@ -657,11 +686,18 @@ final class FrameLoop: @unchecked Sendable {
 
         // Sample the pose as late as possible, just before building the frame.
         let snapshot = tracking.snapshot()
-        let result = shared.mutex.withLock { state in
-            state.advance(
+        let (result, pointerMove) = shared.mutex.withLock { state in
+            let result = state.advance(
                 now: now, dt: dt, presentingAt: presentingAt, snapshot: snapshot,
                 captureGeneration: captureGeneration, newFrame: newFrame, frameSizes: frameSizes, output: output,
                 cursor: cursor, timing: timingNow, extras: extras)
+            return (result, state.pointerMove)
+        }
+        if let pointerMove {
+            CGWarpMouseCursorPosition(pointerMove)
+            // Without this the mouse stays frozen for a quarter of a second
+            // after every warp.
+            CGAssociateMouseAndMouseCursorPosition(1)
         }
         let period = 1 / glassesRefreshRate
         drawable.addPresentedHandler { shown in
@@ -886,6 +922,7 @@ final class FrameLoop: @unchecked Sendable {
                 state.viewport.setGain(gain)
                 state.settings.headGain = state.viewport.gain
             case .toggleFollowCursor: state.settings.followCursor.toggle()
+            case .togglePointerFollowsGaze: state.settings.pointerFollowsGaze.toggle()
             case .toggleTurnZoom: state.settings.zoomOutWhenTurning.toggle()
             case .toggleDiagnostics: state.settings.diagnosticsVisible.toggle()
             case .setLatencyTrim(let ms): state.settings.latencyTrimMs = min(max(ms, 0), maxLatencyTrimMs)
