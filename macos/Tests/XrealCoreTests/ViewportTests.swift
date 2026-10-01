@@ -114,3 +114,49 @@ private let farCorner = SIMD2<Float>(5500, 2000)
     #expect(rightInView(followRoll: true).y > 0.1)
     #expect(abs(rightInView(followRoll: false).y) < 1e-6)
 }
+
+private func viewYaw(_ viewport: ViewportController) -> Float {
+    let ahead = viewport.headRotation * SIMD3(0, 0, -1)
+    return atan2(-ahead.x, -ahead.z)
+}
+
+private func viewPitch(_ viewport: ViewportController) -> Float {
+    let ahead = viewport.headRotation * SIMD3(0, 0, -1)
+    return -asin(ahead.y)
+}
+
+@Test func headMovementCanTurnTheViewFurther() {
+    var settings = Settings()
+    settings.headGain = 2
+    var viewport = ViewportController(settings: settings)
+    viewport.recenter(HeadPose())
+    viewport.track(pose: HeadPose(yaw: 0.2, pitch: 0.1))
+    #expect(abs(viewYaw(viewport) - 0.4) <= steadyRadius + 1e-4)
+    #expect(abs(viewPitch(viewport) - 0.2) <= steadyRadius + 1e-4)
+}
+
+@Test func changingHowFarTheViewTurnsLeavesItWhereItIs() {
+    var viewport = ViewportController(settings: Settings())
+    viewport.recenter(HeadPose())
+    viewport.track(pose: HeadPose(yaw: 0.3))
+    let before = viewYaw(viewport)
+
+    viewport.setGain(3)
+    viewport.track(pose: HeadPose(yaw: 0.3))
+    #expect(abs(viewYaw(viewport) - before) < 1e-4)
+
+    // From there on, the head turns it three times as far.
+    viewport.track(pose: HeadPose(yaw: 0.4))
+    #expect(abs(viewYaw(viewport) - (before + 0.3)) <= steadyRadius + 1e-4)
+}
+
+@Test func recenteringPutsTheViewStraightAheadWhateverTheGain() {
+    var settings = Settings()
+    settings.headGain = 2
+    var viewport = ViewportController(settings: settings)
+    viewport.recenter(HeadPose())
+    viewport.track(pose: HeadPose(yaw: 0.5, pitch: -0.2))
+    viewport.recenter(HeadPose(yaw: 0.5, pitch: -0.2))
+    viewport.track(pose: HeadPose(yaw: 0.5, pitch: -0.2))
+    #expect(abs(viewYaw(viewport)) < 1e-5 && abs(viewPitch(viewport)) < 1e-5)
+}

@@ -13,6 +13,7 @@ import simd
         width: 7672, height: 2160, placement: ScreenPlacement(direction: SIMD3(0.4, 0.3, -1), distance: 1.5, tilt: -0.3),
         curved: true)
     settings.followRoll = false
+    settings.headGain = 2.5
     settings.followCursor = false
 
     var loaded = Settings.parse(settings.serialize())

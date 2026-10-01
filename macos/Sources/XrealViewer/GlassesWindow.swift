@@ -72,17 +72,18 @@ extension NSScreen {
     }
 }
 
-/// Borderless windows cannot take keyboard focus unless they opt in.
-private final class KeyWindow: NSWindow {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
+/// Never takes the keyboard or the mouse: what is typed and clicked goes
+/// to the apps on the canvas, whatever happened to the windows while the
+/// Mac slept or the displays changed.
+private final class ViewWindow: NSWindow {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
 }
 
 /// A view backed by an opaque CAMetalLayer. Nothing is drawn over it, so the
 /// window server can show the layer without compositing it.
 final class MetalView: NSView {
     let metalLayer = CAMetalLayer()
-    var onKey: ((NSEvent) -> Void)?
 
     init(device: MTLDevice) {
         super.init(frame: .zero)
@@ -99,9 +100,7 @@ final class MetalView: NSView {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func makeBackingLayer() -> CALayer { metalLayer }
-    override var acceptsFirstResponder: Bool { true }
     override var isOpaque: Bool { true }
-    override func keyDown(with event: NSEvent) { onKey?(event) }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -134,7 +133,7 @@ final class MetalView: NSView {
     init(device: MTLDevice, displayLink: DisplayLinkThread) {
         self.displayLink = displayLink
         view = MetalView(device: device)
-        window = KeyWindow(
+        window = ViewWindow(
             contentRect: NSRect(x: 0, y: 0, width: 960, height: 540),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "XREAL Viewer"
@@ -142,19 +141,12 @@ final class MetalView: NSView {
         window.backgroundColor = .black
         window.isOpaque = true
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.ignoresMouseEvents = true
         window.contentView = view
     }
 
     var windowID: CGWindowID {
         CGWindowID(window.windowNumber)
-    }
-
-    /// Puts the window full screen on the glasses, taking the keyboard.
-    func show() {
-        place()
-        guard Displays.glassesScreen() != nil else { return }
-        window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(view)
     }
 
     func hide() {

@@ -53,6 +53,9 @@ public struct Settings: Equatable, Sendable {
     public var canvas = RoomScreen(width: 5752, height: 2160, curved: true)
     /// The canvas tilts with the head so it stays level.
     public var followRoll = true
+    /// How many times further the view turns and nods than the head, from
+    /// 1 to `maxHeadGain`.
+    public var headGain: Float = 1
     /// Zoom out while the mouse moves outside the view.
     public var followCursor = true
     /// The radius the canvas bends with when curved, as a multiple of its
@@ -142,6 +145,10 @@ public struct Settings: Equatable, Sendable {
             case "canvas": canvas = canvas ?? parseScreen(value)
             case "glasses_only_screen": glassesOnlyScreen = glassesOnlyScreen ?? parseScreen(value)
             case "follow_roll": parse(value, into: &settings.followRoll)
+            case "head_gain":
+                if let gain = Float(value), gain.isFinite {
+                    settings.headGain = min(max(gain, 1), maxHeadGain)
+                }
             case "follow_cursor": parse(value, into: &settings.followCursor)
             case "lens_correction": parse(value, into: &settings.lensCorrection)
             case "metres_per_room_unit":
@@ -208,6 +215,7 @@ public struct Settings: Equatable, Sendable {
             "vertical_wrap=\(canvas.verticalWrap)",
             "even_text_size=\(canvas.evenSize)",
             "follow_roll=\(followRoll)",
+            "head_gain=\(headGain)",
             "follow_cursor=\(followCursor)",
             "curve_radius=\(curveRadius)",
             "lens_correction=\(lensCorrection)",

@@ -71,6 +71,9 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     /// The captured window's size in points and density, and the longest
     /// side allowed, while capturing a window.
     @MainActor private var windowCapture: (size: CGSize, scale: CGFloat, maxPixels: CGFloat)?
+    /// Called when macOS stops the stream on its own, as it can across
+    /// sleep: the last frame would otherwise stay up, frozen.
+    @MainActor var onStop: (() -> Void)?
 
     init(device: MTLDevice) throws {
         var cache: CVMetalTextureCache?
@@ -249,5 +252,15 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         eprint("Screen capture stopped: \(error.localizedDescription)")
+        let stopped = ObjectIdentifier(stream)
+        Task { @MainActor in
+            // A stream already stopped or replaced on purpose needs nothing.
+            guard let current = self.stream, ObjectIdentifier(current) == stopped else { return }
+            self.stream = nil
+            configuration = nil
+            fps = 0
+            windowCapture = nil
+            onStop?()
+        }
     }
 }

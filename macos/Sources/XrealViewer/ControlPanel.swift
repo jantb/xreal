@@ -344,6 +344,18 @@ private struct ViewSection: View {
     var body: some View {
         Section("View") {
             Toggle("Follow Head Tilt", isOn: model.toggle(\.followsRoll, .toggleRoll))
+            VStack(alignment: .leading) {
+                LabeledContent("Head Movement") {
+                    Text(String(format: "%.2f×", model.settings.headGain)).monospacedDigit()
+                }
+                Slider(
+                    value: Binding(get: { model.settings.headGain }, set: { model.perform(.setHeadGain($0)) }),
+                    in: 1...maxHeadGain, step: 0.25)
+                Text(
+                    "Turns the view this many times further than the head, to look round a wide canvas with less head movement. At 1× the canvas stays put in the room; above it, the canvas slides the other way as you turn. Tilt is never multiplied."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
             Toggle("Predict Head Motion", isOn: model.toggle(\.settings.prediction, .togglePrediction))
             VStack(alignment: .leading) {
                 LabeledContent("Extra Prediction Lead") {

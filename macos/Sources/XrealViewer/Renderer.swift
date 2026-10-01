@@ -121,9 +121,10 @@ private let shaderSource = """
     }
 
     // The glow round the canvas: what is on the canvas near its edge,
-    // mirrored out past it, like the canvas reflected in a dark, frosted
-    // mirror: sharpest at the edge, blurrier farther out, where it shows
-    // the canvas twice as far in, and fading evenly to the eye to black
+    // mirrored out past it, like the canvas reflected in a dark mirror
+    // set against its edge: nearly sharp at the edge, slowly frosting
+    // farther out, where it shows the canvas as far in as the point is
+    // out, and fading evenly to the eye to black
     // over `halo.z` points. Read from the small copy of the canvas, divided
     // by how much of what it blurs is canvas, so the margin round it never
     // darkens it. Light only, added to what is behind.
@@ -139,14 +140,14 @@ private let shaderSource = """
             return float4(0);
         }
         float2 margin = panel.halo.z / panel.halo.xy;
-        float2 mirrored = clamp(inside - 2 * past, 0.0, 1.0);
+        float2 mirrored = clamp(inside - past, 0.0, 1.0);
         float2 inCopy = (mirrored + margin) / (1 + 2 * margin);
         float texel = (panel.halo.x + 2 * panel.halo.z) / float(ambient.get_width());
         float top = float(ambient.get_num_mip_levels() - 1);
         // How widely it is blurred, in points; a level finer than that, as
         // the spline blurs it further, and between two levels both, so it
         // does not step.
-        float spread = 40 + 1.2 * away;
+        float spread = 6 + 0.6 * away;
         float lod = clamp(log2(spread / texel) - 1, 0.0, top);
         uint lower = uint(floor(lod));
         uint upper = min(lower + 1, uint(top));
@@ -194,9 +195,9 @@ private let shaderSource = """
         return out;
     }
 
-    // Each pixel of the copy averages the tile over about three of its own
-    // pixels each way, so the glow is smooth; alpha says it is canvas. The
-    // margin is black and clear.
+    // Each pixel of the copy averages the tile over one and a half of its
+    // own pixels each way, so the glow is smooth without losing the copy's
+    // detail; alpha says it is canvas. The margin is black and clear.
     fragment float4 ambientFragment(AmbientOut in [[stage_in]],
                                     constant float4 *ambient [[buffer(0)]],
                                     texture2d<float> source [[texture(0)]],
@@ -211,12 +212,12 @@ private let shaderSource = """
         float2 uv = float2((onCanvas.x - span.x) / width, onCanvas.y);
         float2 texel = (1 + 2 * margin.xy) / span.zw / float2(width, 1);
         float3 sum = 0;
-        for (int i = 0; i < 8; i++) {
-            for (int j = 0; j < 8; j++) {
-                sum += source.sample(linear, uv + (float2(i, j) / 7 - 0.5) * 3 * texel).rgb;
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 4; j++) {
+                sum += source.sample(linear, uv + (float2(i, j) / 3 - 0.5) * 1.5 * texel).rgb;
             }
         }
-        return float4(sum / 64, 1);
+        return float4(sum / 16, 1);
     }
 
     // The arrow pointing back to the canvas while it is out of view:
@@ -333,7 +334,7 @@ private let shaderSource = """
 
 // The small blurred copy of the canvas, with the margin round it, that the
 // glow round it takes its colours from, in pixels.
-private let ambientSize = SIMD2<Float>(320, 144)
+private let ambientSize = SIMD2<Float>(960, 432)
 // How far out from the middle of each eye's view the arrow pointing back
 // to the canvas sits, as a share of the way to the edge, and half its
 // length in pixels.

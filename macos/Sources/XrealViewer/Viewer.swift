@@ -21,6 +21,12 @@ private let inViewHold = 1.5  // seconds
 private let captureRateInterval = 0.25
 // The display arrangement churns for a moment when the lid opens or closes.
 private let displaysSettleTime = 1.5
+// A capture macOS stopped starts again after this, so tiles that stop
+// together start again once.
+private let captureRestartDelay = 1.0  // seconds
+// After the Mac wakes its captures start afresh this much later, once the
+// displays are back.
+private let wakeSettleTime = 3.0  // seconds
 // Windows brought back from behind the glasses view are staggered this much.
 private let gatherStep: CGFloat = 40
 // The glasses show a frame about 7 ms after it arrives over DisplayPort.
@@ -117,6 +123,8 @@ enum ViewerCommand {
     case resetView
     case togglePrediction
     case toggleRoll
+    /// How many times further the view turns than the head, 1 or more.
+    case setHeadGain(Float)
     case toggleFollowCursor
     case toggleDiagnostics
     case setLatencyTrim(Float)
@@ -587,8 +595,12 @@ final class FrameLoop: @unchecked Sendable {
             // off it.
             if !fence.contains(cursor) {
                 lastFreeCursor = cursor
-            } else if let free = lastFreeCursor {
+            } else if let free = lastFreeCursor ?? escape(from: fence) {
+                lastFreeCursor = nil
                 CGWarpMouseCursorPosition(free)
+                // Without this the mouse stays frozen for a quarter of a
+                // second after every warp.
+                CGAssociateMouseAndMouseCursorPosition(1)
             }
         }
         let output = (width: drawable.texture.width, height: drawable.texture.height)
@@ -640,6 +652,13 @@ final class FrameLoop: @unchecked Sendable {
             onBiasChanged()
         }
     }
+
+    /// Somewhere off `fence` for the mouse when it has nowhere it was
+    /// before: the middle of a display other than the glasses'.
+    private func escape(from fence: CGRect) -> CGPoint? {
+        Displays.active().lazy.map(CGDisplayBounds).first { !$0.intersects(fence) }
+            .map { CGPoint(x: $0.midX, y: $0.midY) }
+    }
 }
 
 /// Ties head tracking, capture and rendering together, and applies the
@@ -668,6 +687,7 @@ final class FrameLoop: @unchecked Sendable {
     private var hotKeys: [GlobalHotKey] = []
     private var settleTask: Task<Void, Never>?
     private var displaysTask: Task<Void, Never>?
+    private var captureRestartTask: Task<Void, Never>?
     private var timers: [Timer] = []
     private let dashboard: Dashboard
     private let pointerImage: PointerImage
@@ -705,7 +725,6 @@ final class FrameLoop: @unchecked Sendable {
         window = GlassesWindow(device: renderer.device, displayLink: displayLink)
         frameLoop.onBiasChanged = { [weak self] in Task { @MainActor in self?.saveSettings() } }
 
-        window.view.onKey = { [unowned self] event in handleKey(event) }
         let modifiers = controlKey | optionKey | cmdKey
         func hotKey(_ keyCode: Int, _ command: ViewerCommand) -> GlobalHotKey {
             GlobalHotKey(keyCode: keyCode, modifiers: modifiers) { [unowned self] in perform(command) }
@@ -728,6 +747,14 @@ final class FrameLoop: @unchecked Sendable {
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.screensChanged() }
+        }
+        // Captures can stop, or stop delivering, across sleep without the
+        // glasses ever going away; start them afresh once the Mac is awake.
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) {
+                [weak self] _ in
+                MainActor.assumeIsolated { self?.restartCaptures(after: wakeSettleTime) }
+            }
         }
         func every(_ interval: Double, _ action: @escaping @MainActor (Viewer) -> Void) -> Timer {
             let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
@@ -812,6 +839,9 @@ final class FrameLoop: @unchecked Sendable {
                 state.viewport.recenter(state.lastPose)
             case .togglePrediction: state.settings.prediction.toggle()
             case .toggleRoll: state.viewport.followsRoll.toggle()
+            case .setHeadGain(let gain):
+                state.viewport.setGain(gain)
+                state.settings.headGain = state.viewport.gain
             case .toggleFollowCursor: state.settings.followCursor.toggle()
             case .toggleDiagnostics: state.settings.diagnosticsVisible.toggle()
             case .setLatencyTrim(let ms): state.settings.latencyTrimMs = min(max(ms, 0), maxLatencyTrimMs)
@@ -938,6 +968,20 @@ final class FrameLoop: @unchecked Sendable {
             // The laptop's screen comes back in its own mode when the lid
             // opens.
             holdLaptopScreen()
+        }
+    }
+
+    /// Starts the canvas's and the pinned window's captures again after
+    /// `delay`, keeping the canvas. Every request within the delay is one
+    /// restart, so tiles stopping together, or a wake right after, start
+    /// everything once.
+    private func restartCaptures(after delay: Double) {
+        captureRestartTask?.cancel()
+        captureRestartTask = Task {
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            eprint("Starting the captures again")
+            startSource()
+            restartPinned()
         }
     }
 
@@ -1129,7 +1173,7 @@ final class FrameLoop: @unchecked Sendable {
             holdLaptopScreen()
             return
         }
-        window.show()
+        window.place()
         holdLaptopScreen()
         // For measuring the glasses' output on its own: no canvas, no
         // captures, only black frames, still timed.
@@ -1208,6 +1252,7 @@ final class FrameLoop: @unchecked Sendable {
     ) async -> (ScreenCapture, String?) {
         do {
             let capture = try ScreenCapture(device: device)
+            capture.onStop = { [weak self] in self?.restartCaptures(after: captureRestartDelay) }
             do {
                 guard let content else { throw CaptureError.displayNotShareable }
                 try await capture.start(
@@ -1278,6 +1323,13 @@ final class FrameLoop: @unchecked Sendable {
                 return
             }
             let capture = try ScreenCapture(device: device)
+            // As when the window closes: found again once it is back.
+            capture.onStop = { [weak self] in
+                Task {
+                    try? await Task.sleep(for: .seconds(captureRestartDelay))
+                    self?.restartPinned()
+                }
+            }
             try await capture.start(window: found, fps: pinnedFps, maxPixels: maxPinnedPixels)
             guard !Task.isCancelled else {
                 await capture.stop()
@@ -1318,22 +1370,4 @@ final class FrameLoop: @unchecked Sendable {
         }
     }
 
-    // MARK: Keys
-
-    private func handleKey(_ event: NSEvent) {
-        switch Int(event.keyCode) {
-        case kVK_Space: perform(.calibrate)
-        case kVK_Escape: NSApp.terminate(nil)
-        default: handleCharacter(event.charactersIgnoringModifiers?.lowercased() ?? "")
-        }
-    }
-
-    private func handleCharacter(_ character: String) {
-        switch character {
-        case "c": perform(.recenter)
-        case "r": perform(.resetView)
-        case "p": perform(.togglePrediction)
-        default: break
-        }
-    }
 }
