@@ -301,8 +301,8 @@ private func turnSeen(framesLate late: Double) throws -> Float {
     let view = try #require(room)
     let point = canvas.roomPoint(ofPixel: SIMD2(Float(cursor.x), Float(cursor.y)), curveRadius: state.settings.curveRadius)
     let seen = try #require(view.outputPoint(ofRoom: point))
-    // In view, at its left edge, level with where it was.
-    #expect(seen.x < -0.6 && seen.x > -0.9)
+    // Just in view, at its very left border, level with where it was.
+    #expect(seen.x < -0.9 && seen.x >= -1)
     #expect(abs(seen.y) < 0.1)
 }
 
