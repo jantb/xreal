@@ -75,8 +75,9 @@ large it is, to see where the turn is heading, and zooms back in as the
 head slows, landing sharp at the zoom it had. While the view is zoomed out
 to show the mouse, a light blue ring round it shows where it is, and the
 pointer keeps its size. With **Zoom Out to Show Cursor** off, the pointer
-instead glides to where you look once you leave it out of view, and stays
-put while it is in view or while you move the mouse.
+instead glides to just inside the edge of your view, nearest where it was,
+once you leave it out of view, and rides along there while you keep
+turning; it stays put while it is in view or while you move the mouse.
 
 Above the canvas, where you see it by looking up, hangs a row tilted to face
 you: a dashboard updated ten times a second (time and thermal state, CPU per

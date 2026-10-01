@@ -282,6 +282,30 @@ private func turnSeen(framesLate late: Double) throws -> Float {
     #expect(abs(try pointerWidth(room) - unzoomed) < unzoomed * 0.01)
 }
 
+@Test func aPointerLeftOutOfViewIsBroughtToTheNearestEdgeOfTheView() throws {
+    var state = freshState()
+    state.settings.followCursor = false
+    let canvas = state.settings.canvas
+    state.canvasBounds = CGRect(x: 0, y: 0, width: canvas.width, height: canvas.height)
+    // Left behind at the canvas's far left, looking straight ahead.
+    var cursor = CGPoint(x: 100, y: 1080)
+    var now = monotonicNow()
+    var room: RoomView?
+    for _ in 0..<180 {
+        now += 1 / 90
+        room = state.frame(now: now, cursor: cursor).room
+        if let move = state.pointerMove {
+            cursor = move
+        }
+    }
+    let view = try #require(room)
+    let point = canvas.roomPoint(ofPixel: SIMD2(Float(cursor.x), Float(cursor.y)), curveRadius: state.settings.curveRadius)
+    let seen = try #require(view.outputPoint(ofRoom: point))
+    // In view, at its left edge, level with where it was.
+    #expect(seen.x < -0.6 && seen.x > -0.9)
+    #expect(abs(seen.y) < 0.1)
+}
+
 @Test func ambientLightHangsAllRoundTheCanvasWhenOn() throws {
     var state = freshState()
     let off = try #require(state.frame().room)

@@ -75,8 +75,10 @@ private let desktopBeforeKey = "canvasDesktopPictureBefore"
 // glasses pixels, and how far zoomed out it takes to show it fully.
 private let locatorRadius: Float = 40
 private let locatorFadeIn: Float = 0.15
-// The pointer counts as in view inside this part of the view.
+// The pointer counts as in view inside this part of the view, and is
+// brought to this far out in it when left outside.
 private let pointerInViewMargin: Float = 0.9
+private let pointerEdgeMargin: Float = 0.8
 // How far the dashboard and the pinned window hang, as a share of how far
 // they would hang on the canvas's own surface.
 private let overheadNearness: Float = 0.8
@@ -385,15 +387,15 @@ struct ViewerState: Sendable {
         viewport.track(pose: pose, dt: dt)
         var room = roomView(now: now, dt: dt, output: output, frameSizes: frameSizes, cursor: cursor, extras: extras)
         // Without zooming out to show the pointer, it is brought along to
-        // where the viewer looks instead, once left out of view.
+        // just inside the edge of the view instead, once left out of it.
         let onCanvas = cursor.flatMap { point in canvasPoint(ofCursor: point).map { (point, $0) } }
-        let inView = onCanvas.map { _, pixel in
-            let point = settings.canvas.roomPoint(ofPixel: pixel, curveRadius: settings.curveRadius)
-            return room.isAhead(point) && room.shows(point, scale: 1, margin: pointerInViewMargin)
+        let cursorInRoom = onCanvas.map { _, pixel in
+            settings.canvas.roomPoint(ofPixel: pixel, curveRadius: settings.curveRadius)
         }
+        let inView = cursorInRoom.map { room.isAhead($0) && room.shows($0, scale: 1, margin: pointerInViewMargin) }
         pointerMove = pointerGlide.update(
             cursor: onCanvas.map { point, _ in SIMD2(Float(point.x), Float(point.y)) }, inView: inView ?? true,
-            target: gaze.flatMap(globalPoint(ofCanvas:)),
+            target: (cursorInRoom.flatMap { edgeOfView(nearest: $0, in: room) } ?? gaze).flatMap(globalPoint(ofCanvas:)),
             enabled: settings.pointerFollowsGaze && !settings.followCursor, now: now, dt: dt,
             bounds: canvasBounds.map {
                 (SIMD2(Float($0.minX), Float($0.minY)), SIMD2(Float($0.maxX) - 1, Float($0.maxY) - 1))
@@ -559,6 +561,33 @@ struct ViewerState: Sendable {
         return SIMD2(
             Float((point.x - bounds.minX) / bounds.width) * Float(canvas.width),
             Float((point.y - bounds.minY) / bounds.height) * Float(canvas.height))
+    }
+
+    /// The canvas's pixel, in its points from the top-left corner, just
+    /// inside the edge of the view nearest the room point `point`; nil when
+    /// none of the way from there to the middle of the view is on the
+    /// canvas.
+    private func edgeOfView(nearest point: SIMD3<Float>, in room: RoomView) -> SIMD2<Float>? {
+        let head = room.headRotation.transpose * point
+        var at: SIMD2<Float>
+        if head.z < -1e-6 {
+            at = SIMD2(head.x, head.y) / -head.z / room.tanHalfFov
+        } else {
+            // Behind: as far out as can be, the way round it is.
+            let side = SIMD2(head.x, head.y)
+            guard simd_length(side) > 1e-6 else { return nil }
+            at = side / max(abs(side.x), abs(side.y))
+        }
+        at = simd_clamp(at, SIMD2(repeating: -pointerEdgeMargin), SIMD2(repeating: pointerEdgeMargin))
+        // Where that edge is off the canvas, as looking past a corner, the
+        // nearest canvas towards the middle of the view.
+        for step in stride(from: Float(1), through: 0, by: -0.125) {
+            let direction = room.headRotation * simd_normalize(SIMD3(at * step * room.tanHalfFov, -1))
+            if let pixel = gazeTarget(direction, on: settings.canvas, curveRadius: settings.curveRadius) {
+                return pixel
+            }
+        }
+        return nil
     }
 
     /// Where the canvas's `pixel`, in its points from the top-left corner, is

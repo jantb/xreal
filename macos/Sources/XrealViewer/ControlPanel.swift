@@ -383,10 +383,10 @@ private struct ViewSection: View {
             Toggle("Zoom Out to Show Cursor", isOn: model.toggle(\.settings.followCursor, .toggleFollowCursor))
             VStack(alignment: .leading) {
                 Toggle(
-                    "Otherwise Bring the Pointer to Where You Look",
+                    "Otherwise Bring the Pointer Into View",
                     isOn: model.toggle(\.settings.pointerFollowsGaze, .togglePointerFollowsGaze))
                 Text(
-                    "Once you look away and leave the pointer out of view, it glides to where you look. While it is in view, or while you move the mouse, it stays put."
+                    "Once you look away and leave the pointer out of view, it glides to just inside the edge of your view, nearest where it was, and rides along there while you keep turning. While it is in view, or while you move the mouse, it stays put."
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }
