@@ -220,6 +220,17 @@ private let shaderSource = """
         return float4(sum / 16, 1);
     }
 
+    // The ring round the mouse pointer while the view is zoomed out to
+    // show it, filling its square panel: light blue like the canvas's
+    // outline, with a faint wash inside, as strong as halo.w.
+    fragment float4 locatorFragment(PanelOut in [[stage_in]], constant Panel &panel [[buffer(0)]]) {
+        float d = length(in.uv - 0.5) * 2;  // 0 in the middle, 1 at the edge
+        float width = max(fwidth(d), 1e-5);
+        float ring = saturate((0.08 - abs(d - 0.82)) / width + 0.5);
+        float wash = 0.15 * saturate((0.82 - d) / width + 0.5);
+        return float4(0.1, 0.52, 1, 1) * max(ring, wash) * panel.halo.w;
+    }
+
     // The arrow pointing back to the canvas while it is out of view:
     // arrow[0].xy its middle in clip space, zw the way it points, in pixels
     // with y up; arrow[1].xy half its length in clip space across and up.
@@ -370,7 +381,7 @@ struct PanelImages: Sendable {
         case .status: status
         case .pinned: pinned
         case .pointer: pointer
-        case .ambient: nil
+        case .ambient, .locator: nil
         }
     }
 }
@@ -390,6 +401,7 @@ final class Renderer: @unchecked Sendable {
     // The glow round the canvas, and the small blurred copy of the canvas it
     // takes its colours from, eased from frame to frame.
     private let haloPipeline: MTLRenderPipelineState
+    private let locatorPipeline: MTLRenderPipelineState
     private let ambientPipeline: MTLRenderPipelineState
     private let arrowPipeline: MTLRenderPipelineState
     private var ambient: MTLTexture?
@@ -431,6 +443,8 @@ final class Renderer: @unchecked Sendable {
         panelPipeline = try device.makeRenderPipelineState(descriptor: panelDescriptor)
         panelDescriptor.fragmentFunction = library.makeFunction(name: "haloFragment")
         haloPipeline = try device.makeRenderPipelineState(descriptor: panelDescriptor)
+        panelDescriptor.fragmentFunction = library.makeFunction(name: "locatorFragment")
+        locatorPipeline = try device.makeRenderPipelineState(descriptor: panelDescriptor)
         panelDescriptor.vertexFunction = library.makeFunction(name: "arrowVertex")
         panelDescriptor.fragmentFunction = library.makeFunction(name: "arrowFragment")
         arrowPipeline = try device.makeRenderPipelineState(descriptor: panelDescriptor)
@@ -624,7 +638,10 @@ final class Renderer: @unchecked Sendable {
             Float(eye.distortion?.columns ?? 1), Float(eye.distortion?.rows ?? 1), eye.size.x, eye.size.y)
         for panel in room.panels {
             let isAmbient = panel.source == .ambient
-            guard let texture = isAmbient ? ambient : images[panel.source]?.texture else { continue }
+            let isLocator = panel.source == .locator
+            // The ring is drawn, not read from an image.
+            let texture = isAmbient ? ambient : images[panel.source]?.texture
+            guard texture != nil || isLocator else { continue }
             let surface = panel.surface
             let rect = panel.rect
             // How wide and tall the piece looks, roughly, from its distance.
@@ -644,14 +661,15 @@ final class Renderer: @unchecked Sendable {
                 rect: SIMD4(rect.top, rect.bottom, surface.lean, surface.wrap),
                 outline: SIMD4(
                     panel.highlighted ? 1 : 0, Float(rows), isCanvas && sharpen ? 1 : 0,
-                    !softEdges || panel.source == .pointer ? 0 : isCanvas ? 1 : 2),
+                    !softEdges || panel.source == .pointer || isLocator ? 0 : isCanvas ? 1 : 2),
                 spin0: SIMD4(spin.columns.0, 0), spin1: SIMD4(spin.columns.1, 0), spin2: SIMD4(spin.columns.2, 0),
                 lens: lens, lensGrid: lensGrid, halo: panel.halo,
                 // The dashboard's cards and the pinned window hide the glow
                 // behind them.
                 backing: SIMD4(panel.source == .status || panel.source == .pinned ? 1 : 0, 0, 0, 0))
-            encoder.setRenderPipelineState(isAmbient ? haloPipeline : panelPipeline)
-            encoder.setDepthStencilState(panel.source == .pointer || isAmbient ? overDepthState : depthState)
+            encoder.setRenderPipelineState(isAmbient ? haloPipeline : isLocator ? locatorPipeline : panelPipeline)
+            encoder.setDepthStencilState(
+                panel.source == .pointer || isAmbient || isLocator ? overDepthState : depthState)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<PanelUniforms>.stride, index: 0)
             encoder.setFragmentTexture(texture, index: 0)

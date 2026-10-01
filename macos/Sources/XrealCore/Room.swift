@@ -562,6 +562,9 @@ public struct RoomView: Sendable {
             case pointer
             /// The glow round the canvas, in the colours of its edges.
             case ambient
+            /// A ring round the mouse pointer while the view is zoomed out
+            /// to show it, as strong as the panel's `halo.w`, 0 to 1.
+            case locator
         }
 
         public var source: Source
@@ -571,7 +574,8 @@ public struct RoomView: Sendable {
         /// Outlined, because the canvas is being carried or was just moved.
         public var highlighted: Bool
         /// For the glow round the canvas: the canvas's size in points, how
-        /// far out the glow reaches in points, and how bright it is.
+        /// far out the glow reaches in points, and how bright it is. For the
+        /// ring round the mouse, w alone: how strongly it shows.
         public var halo: SIMD4<Float>
 
         public init(

@@ -67,6 +67,10 @@ let maxCurveRadius: Float = 5
 // how bright it is at the edge.
 private let ambientReach: Float = 480
 private let ambientBrightness: Float = 0.75
+// The ring round the mouse while zoomed out to show it: its radius in
+// glasses pixels, and how far zoomed out it takes to show it fully.
+private let locatorRadius: Float = 40
+private let locatorFadeIn: Float = 0.15
 // How far the dashboard and the pinned window hang, as a share of how far
 // they would hang on the canvas's own surface.
 private let overheadNearness: Float = 0.8
@@ -400,8 +404,19 @@ struct ViewerState: Sendable {
         ) { scale, margin in
             cursorPoint.map { room.shows($0, scale: scale, margin: margin) } ?? false
         }
-        // And while the head turns quickly; whichever wants more wins.
-        let turnScale = turnZoom.update(speed: viewport.headSpeed, enabled: settings.zoomOutWhenTurning, dt: dt)
+        // And while the head turns quickly, as far as showing the whole
+        // canvas; whichever wants more wins.
+        var whole: Float = 1
+        if settings.zoomOutWhenTurning {
+            let edges: [SIMD2<Float>] = [[0, 0], [0.5, 0], [1, 0], [0, 0.5], [1, 0.5], [0, 1], [0.5, 1], [1, 1]]
+            let size = SIMD2(Float(canvas.width), Float(canvas.height))
+            // What is behind no zoom can show; the rest of it, then.
+            let points = edges.map { canvas.roomPoint(ofPixel: $0 * size, curveRadius: curveRadius) }
+                .filter(room.isAhead)
+            whole = TurnZoom.wholeCanvasScale(points) { room.shows($0, scale: $1, margin: $2) }
+        }
+        let turnScale = turnZoom.update(
+            speed: viewport.headSpeed, enabled: settings.zoomOutWhenTurning, whole: whole, dt: dt)
         let scale = min(cursorScale, turnScale)
         room.tanHalfFov /= scale
         // Each eye as the glasses' calibration describes it, zoomed out with
@@ -455,9 +470,21 @@ struct ViewerState: Sendable {
                 room.panels.append(RoomView.Panel(source: .pinned, surface: pinned.surface, rect: pinned.rect))
             }
         }
-        // The pointer last, over everything it lies on.
+        // While zoomed out to show the mouse, a ring round it, the same
+        // size to the eye however far out, to find it by.
+        let finding = min(max((1 - cursorScale) / locatorFadeIn, 0), 1)
+        if finding > 0, let point = cursor.flatMap(canvasPoint(ofCursor:)) {
+            let radius = locatorRadius * canvas.placement.distance / scale
+            let rect = pointerRect(
+                canvas: canvas, at: point, size: SIMD2(repeating: 2 * radius), hotSpot: SIMD2(repeating: radius))
+            room.panels.append(
+                RoomView.Panel(source: .locator, surface: surface, rect: rect, halo: SIMD4(0, 0, 0, finding)))
+        }
+        // The pointer last, over everything it lies on, keeping its size to
+        // the eye while the view zooms out.
         if settings.livePointer, let pointer = extras.pointer, let point = cursor.flatMap(canvasPoint(ofCursor:)) {
-            let rect = pointerRect(canvas: canvas, at: point, size: pointer.size, hotSpot: pointer.hotSpot)
+            let rect = pointerRect(
+                canvas: canvas, at: point, size: pointer.size / scale, hotSpot: pointer.hotSpot / scale)
             room.panels.append(RoomView.Panel(source: .pointer, surface: surface, rect: rect))
         }
         // Looking away from all of it, an arrow shows the way back. Looking

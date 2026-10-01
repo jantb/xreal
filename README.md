@@ -66,9 +66,11 @@ multiplied. Each head direction keeps one place on the canvas, however
 slowly or quickly the head got there, while the wobble of holding still,
 tremor and the pulse going back and forth, is left one to one, so the
 canvas holds still in the room. **Zoom Out on Quick Turns**
-widens the view during a quick turn, up to half as much canvas again each
-way, to see where the turn is heading, and zooms back in as the head
-slows, landing sharp at the zoom it had.
+glides out during a quick turn until the whole canvas is in view, however
+large it is, to see where the turn is heading, and zooms back in as the
+head slows, landing sharp at the zoom it had. While the view is zoomed out
+to show the mouse, a light blue ring round it shows where it is, and the
+pointer keeps its size.
 
 Above the canvas, where you see it by looking up, hangs a row tilted to face
 you: a dashboard updated ten times a second (time and thermal state, CPU per

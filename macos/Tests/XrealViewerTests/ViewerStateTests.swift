@@ -254,6 +254,34 @@ private func turnSeen(framesLate late: Double) throws -> Float {
     #expect(try !drawsPointer(at: CGPoint(x: 2800, y: 1000)))
 }
 
+@Test func zoomedOutToShowTheMouseARingShowsWhereItIsAndThePointerKeepsItsSize() throws {
+    var state = freshState()
+    let canvas = state.settings.canvas
+    state.canvasBounds = CGRect(x: 0, y: 0, width: canvas.width, height: canvas.height)
+    let extras = ExtraSizes(pointer: (SIMD2(32, 32), SIMD2(4, 4)))
+    let middle = try #require(state.frame(cursor: CGPoint(x: 2876, y: 1080), extras: extras).room)
+    #expect(!middle.panels.contains { $0.source == .locator })
+    let pointerWidth = { (room: RoomView) throws -> Float in
+        let pointer = try #require(room.panels.first { $0.source == .pointer })
+        // As wide as it looks: on the canvas, against how wide the view is.
+        return (pointer.rect.right - pointer.rect.left) / room.tanHalfFov.x
+    }
+    let unzoomed = try pointerWidth(middle)
+
+    // The mouse moving off towards a far corner, out of view.
+    var now = monotonicNow()
+    var room = middle
+    for step in 0..<90 {
+        now += 1 / 90
+        let cursor = CGPoint(x: 5000 + Double(step) * 5, y: 1900)
+        room = try #require(state.frame(now: now, cursor: cursor, extras: extras).room)
+    }
+    let zoomedOut = room.tanHalfFov.x > middle.tanHalfFov.x * 1.2
+    #expect(zoomedOut)
+    #expect(room.panels.contains { $0.source == .locator })
+    #expect(abs(try pointerWidth(room) - unzoomed) < unzoomed * 0.01)
+}
+
 @Test func ambientLightHangsAllRoundTheCanvasWhenOn() throws {
     var state = freshState()
     let off = try #require(state.frame().room)
